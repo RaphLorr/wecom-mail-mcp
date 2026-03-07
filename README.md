@@ -177,6 +177,43 @@ uvx wecom-mail-mcp
 - 发件人不是由 AI 传入的，而是企业微信“应用邮箱账号”
 - 服务端会把 `text/plain` 映射为官方接口的 `text`
 - 服务端会把 `text/html` 映射为官方接口的 `html`
+- 如果发送 HTML，请显式传 `content_type="html"`
+- MCP 工具描述会直接告知客户端 HTML 邮件兼容限制，避免把网页模板直接当邮件模板发送
+
+### HTML 邮件兼容建议
+
+如果要发 HTML 邮件，按最保守的邮件写法来：
+
+- 优先使用 `table`、`tbody`、`tr`、`td` 做布局
+- 文本和基础内容只用 `p`、`br`、`span`、`strong`、`b`、`em`、`i`、`h1` 到 `h4`、`a`、`img`
+- 样式尽量写成 inline style，不要依赖复杂选择器
+- 图片使用公网 `https` 绝对地址
+
+尽量避免：
+
+- `script`、`iframe`、`form`、`video`、`audio`、`canvas`、`svg`
+- 外链 CSS、Web Font
+- `flex`、`grid`、`position`
+- 相对路径、本地路径、网页式复杂模板
+
+推荐骨架：
+
+```html
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+  <tr>
+    <td>
+      <h2 style="margin:0 0 16px;">标题</h2>
+      <p style="margin:0 0 12px;">正文</p>
+      <a href="https://example.com">链接</a>
+      <img
+        src="https://example.com/demo.png"
+        alt=""
+        style="display:block;width:100%;height:auto;border:0;"
+      >
+    </td>
+  </tr>
+</table>
+```
 
 ### `get_mailbox_info`
 
