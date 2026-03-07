@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "wecom-mail-mcp"
+version = "0.1.0"
+description = "MCP server for sending email through the official WeCom mail API."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+  { name = "OpenAI Codex" },
+]
+dependencies = [
+  "httpx>=0.28.1",
+  "mcp>=1.26.0",
+  "pydantic-settings>=2.7.0",
+]
+
+[project.scripts]
+wecom-mail-mcp = "wecom_mail_mcp.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wecom_mail_mcp"]
+
+[tool.uv]
+package = true
