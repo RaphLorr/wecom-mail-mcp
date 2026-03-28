@@ -5,3 +5,15 @@ build/
 dist/
 *.egg-info/
 .env
+
+#docs
+docs/*
+
+#tmp file
+tmp/*
+.tmp/*
+
+#CLAUDE and CODEX
+CLAUDE.md
+AGENTS.md
+.claude/*

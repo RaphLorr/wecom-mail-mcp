@@ -9,7 +9,13 @@ import httpx
 
 from .config import Settings
 from .errors import WeComAPIError, WeComClientError, WeComResponseError
-from .models import MailboxInfo, SendEmailRequest
+from .models import (
+    BookMeetingRoomRequest,
+    MailboxInfo,
+    SendEmailRequest,
+    SendMeetingEmailRequest,
+    SendScheduleEmailRequest,
+)
 
 TOKEN_ERRCODES = {40001, 40014, 42001}
 
@@ -40,6 +46,10 @@ class WeComMailClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    # ------------------------------------------------------------------
+    # Mailbox
+    # ------------------------------------------------------------------
+
     async def get_mailbox_info(self, *, force_refresh: bool = False) -> MailboxInfo:
         if self._mailbox_info is not None and not force_refresh:
             return self._mailbox_info
@@ -56,6 +66,10 @@ class WeComMailClient:
         self._mailbox_info = mailbox
         return mailbox
 
+    # ------------------------------------------------------------------
+    # Plain email
+    # ------------------------------------------------------------------
+
     async def send_email(self, request: SendEmailRequest) -> MailboxInfo:
         mailbox = await self.get_mailbox_info()
         payload = {
@@ -71,6 +85,174 @@ class WeComMailClient:
             json_body=payload,
         )
         return mailbox
+
+    # ------------------------------------------------------------------
+    # Schedule email (日程邮件)
+    # ------------------------------------------------------------------
+
+    async def send_schedule_email(self, request: SendScheduleEmailRequest) -> MailboxInfo:
+        mailbox = await self.get_mailbox_info()
+        payload = {
+            "to": {"emails": request.to_emails},
+            "subject": request.subject,
+            "content": request.content,
+            "content_type": request.content_type,
+            "schedule": {
+                "method": "request",
+                "location": request.location,
+                "start_time": request.start_time,
+                "end_time": request.end_time,
+                "reminders": {
+                    "is_remind": 1,
+                    "remind_before_event_mins": request.remind_before_mins,
+                },
+            },
+        }
+        await self._request_authed(
+            "POST",
+            "/cgi-bin/exmail/app/compose_send",
+            endpoint_name="compose_send_schedule",
+            json_body=payload,
+        )
+        return mailbox
+
+    # ------------------------------------------------------------------
+    # Meeting email (会议邮件 with 腾讯会议)
+    # ------------------------------------------------------------------
+
+    async def send_meeting_email(self, request: SendMeetingEmailRequest) -> MailboxInfo:
+        mailbox = await self.get_mailbox_info()
+        payload = {
+            "to": {"emails": request.to_emails},
+            "subject": request.subject,
+            "content": request.content,
+            "content_type": request.content_type,
+            "schedule": {
+                "method": "request",
+                "location": request.location,
+                "start_time": request.start_time,
+                "end_time": request.end_time,
+                "reminders": {
+                    "is_remind": 1,
+                    "remind_before_event_mins": request.remind_before_mins,
+                },
+            },
+            "meeting": {
+                "option": {
+                    "enable_waiting_room": request.enable_waiting_room,
+                    "allow_enter_before_host": request.allow_enter_before_host,
+                },
+                "meeting_admins": {
+                    "userids": [request.meeting_admin_userid],
+                },
+            },
+        }
+        await self._request_authed(
+            "POST",
+            "/cgi-bin/exmail/app/compose_send",
+            endpoint_name="compose_send_meeting",
+            json_body=payload,
+        )
+        return mailbox
+
+    # ------------------------------------------------------------------
+    # Meeting rooms
+    # ------------------------------------------------------------------
+
+    async def list_meeting_rooms(
+        self,
+        city: str = "",
+        building: str = "",
+        floor: str = "",
+    ) -> list[dict[str, Any]]:
+        body: dict[str, Any] = {}
+        if city:
+            body["city"] = city
+        if building:
+            body["building"] = building
+        if floor:
+            body["floor"] = floor
+
+        data = await self._request_authed(
+            "POST",
+            "/cgi-bin/oa/meetingroom/list",
+            endpoint_name="meetingroom_list",
+            json_body=body,
+        )
+        raw_list = data.get("meetingroom_list", [])
+        return raw_list if isinstance(raw_list, list) else []
+
+    async def query_room_availability(
+        self,
+        start_time: int,
+        end_time: int,
+        meetingroom_id: int | None = None,
+        city: str = "",
+        building: str = "",
+        floor: str = "",
+    ) -> list[dict[str, Any]]:
+        body: dict[str, Any] = {
+            "start_time": start_time,
+            "end_time": end_time,
+        }
+        if meetingroom_id is not None:
+            body["meetingroom_id"] = meetingroom_id
+        if city:
+            body["city"] = city
+        if building:
+            body["building"] = building
+        if floor:
+            body["floor"] = floor
+
+        data = await self._request_authed(
+            "POST",
+            "/cgi-bin/oa/meetingroom/get_booking_info",
+            endpoint_name="meetingroom_get_booking_info",
+            json_body=body,
+        )
+        raw_list = data.get("booking_list", [])
+        return raw_list if isinstance(raw_list, list) else []
+
+    async def book_meeting_room(self, request: BookMeetingRoomRequest) -> tuple[str, str]:
+        """Book a meeting room. Returns (schedule_id, booking_id)."""
+
+        body = {
+            "meetingroom_id": request.meetingroom_id,
+            "subject": request.subject,
+            "booker": request.booker_userid,
+            "start_time": request.start_time,
+            "end_time": request.end_time,
+        }
+        data = await self._request_authed(
+            "POST",
+            "/cgi-bin/oa/meetingroom/book",
+            endpoint_name="meetingroom_book",
+            json_body=body,
+        )
+        schedule_id = self._require_string(
+            data, "schedule_id", "WeCom did not return schedule_id after booking."
+        )
+        booking_id = self._require_string(
+            data, "booking_id", "WeCom did not return booking_id after booking."
+        )
+        return schedule_id, booking_id
+
+    async def cancel_room_booking(self, meeting_id: str, booking_id: str) -> None:
+        """Cancel a meeting room booking."""
+
+        await self._request_authed(
+            "POST",
+            "/cgi-bin/oa/meetingroom/cancel_book",
+            endpoint_name="meetingroom_cancel_book",
+            json_body={
+                "meeting_id": meeting_id,
+                "booking_id": booking_id,
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # Token management (unchanged)
+    # ------------------------------------------------------------------
 
     async def _request_authed(
         self,

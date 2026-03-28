@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 CONTENT_TYPE_ALIASES = {
@@ -12,6 +12,7 @@ CONTENT_TYPE_ALIASES = {
     "html": "html",
     "text/html": "html",
 }
+
 
 
 def normalize_content_type(value: str | None) -> str:
@@ -40,6 +41,22 @@ def validate_email_address(value: str) -> str:
     if not EMAIL_PATTERN.fullmatch(normalized):
         raise ValueError(f"Invalid email address: {value}")
     return normalized
+
+
+def validate_time_range(start_time: int, end_time: int) -> None:
+    """Validate that start_time and end_time form a valid range."""
+
+    if start_time <= 0:
+        raise ValueError("start_time must be a positive Unix timestamp")
+    if end_time <= 0:
+        raise ValueError("end_time must be a positive Unix timestamp")
+    if end_time <= start_time:
+        raise ValueError("end_time must be after start_time")
+
+
+# ---------------------------------------------------------------------------
+# Plain email models (existing)
+# ---------------------------------------------------------------------------
 
 
 class SendEmailRequest(BaseModel):
@@ -101,3 +118,165 @@ class MailboxInfoResult(BaseModel):
     provider: str = "wecom"
     sender_email: str
     alias_list: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Schedule / meeting email models
+# ---------------------------------------------------------------------------
+
+
+class SendScheduleEmailRequest(BaseModel):
+    """Validated input for a schedule (calendar) invitation email."""
+
+    to_emails: list[str] = Field(min_length=1, description="Recipient email addresses.")
+    subject: str = Field(description="Email and schedule title.")
+    content: str = Field(description="Email body / schedule description.")
+    content_type: str = Field(default="text", description="Body type: text or html.")
+    location: str = Field(default="", description="Meeting location.")
+    start_time: int = Field(description="Start time as Unix timestamp.")
+    end_time: int = Field(description="End time as Unix timestamp.")
+    remind_before_mins: int = Field(default=15, ge=0, description="Remind N minutes before.")
+
+    @field_validator("to_emails")
+    @classmethod
+    def _validate_emails(cls, value: list[str]) -> list[str]:
+        return [validate_email_address(e) for e in value]
+
+    @field_validator("subject")
+    @classmethod
+    def _validate_subject(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Subject cannot be empty")
+        return value
+
+    @field_validator("content")
+    @classmethod
+    def _validate_content(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Content cannot be empty")
+        return value
+
+    @field_validator("content_type")
+    @classmethod
+    def _normalize_content_type(cls, value: str) -> str:
+        return normalize_content_type(value)
+
+    @model_validator(mode="after")
+    def _validate_time_range(self) -> SendScheduleEmailRequest:
+        validate_time_range(self.start_time, self.end_time)
+        return self
+
+
+class SendMeetingEmailRequest(SendScheduleEmailRequest):
+    """Validated input for a meeting invitation email with 腾讯会议."""
+
+    meeting_admin_userid: str = Field(description="Meeting admin userid (required by WeCom).")
+    enable_waiting_room: bool = Field(default=True, description="Enable waiting room.")
+    allow_enter_before_host: bool = Field(default=True, description="Allow joining before host.")
+
+    @field_validator("meeting_admin_userid")
+    @classmethod
+    def _validate_admin(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("meeting_admin_userid cannot be empty")
+        return value.strip()
+
+
+class SendScheduleEmailResult(BaseModel):
+    """Structured MCP response for schedule email sends."""
+
+    ok: bool = True
+    provider: str = "wecom"
+    sender_email: str
+    to_emails: list[str]
+    subject: str
+    start_time: int
+    end_time: int
+    message: str = "日程邮件已发送。"
+
+
+class SendMeetingEmailResult(SendScheduleEmailResult):
+    """Structured MCP response for meeting email sends."""
+
+    message: str = "会议邮件已发送（含腾讯会议链接）。"
+
+
+# ---------------------------------------------------------------------------
+# Meeting room models
+# ---------------------------------------------------------------------------
+
+
+class MeetingRoom(BaseModel):
+    """A single meeting room from WeCom."""
+
+    meetingroom_id: int
+    name: str
+    capacity: int
+    equipment: list[int] = Field(default_factory=list)
+    need_approval: int = 0
+
+
+class ListMeetingRoomsResult(BaseModel):
+    """Structured MCP response for meeting room listing."""
+
+    ok: bool = True
+    rooms: list[MeetingRoom]
+
+
+class RoomBookingInfo(BaseModel):
+    """Booking info for a single room in a time window."""
+
+    meetingroom_id: int
+    schedule: list[dict] = Field(default_factory=list)
+
+
+class QueryRoomAvailabilityResult(BaseModel):
+    """Structured MCP response for room availability queries."""
+
+    ok: bool = True
+    booking_list: list[RoomBookingInfo]
+
+
+class BookMeetingRoomRequest(BaseModel):
+    """Validated input for booking a meeting room."""
+
+    meetingroom_id: int = Field(description="Meeting room ID.")
+    subject: str = Field(description="Booking subject.")
+    booker_userid: str = Field(description="Booker's WeCom userid.")
+    start_time: int = Field(description="Start time as Unix timestamp.")
+    end_time: int = Field(description="End time as Unix timestamp.")
+
+    @field_validator("subject")
+    @classmethod
+    def _validate_subject(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Subject cannot be empty")
+        return value
+
+    @field_validator("booker_userid")
+    @classmethod
+    def _validate_booker(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("booker_userid cannot be empty")
+        return value.strip()
+
+    @model_validator(mode="after")
+    def _validate_time_range(self) -> BookMeetingRoomRequest:
+        validate_time_range(self.start_time, self.end_time)
+        return self
+
+
+class BookMeetingRoomResult(BaseModel):
+    """Structured MCP response for room booking."""
+
+    ok: bool = True
+    schedule_id: str = Field(description="Used as meeting_id when cancelling.")
+    booking_id: str
+    message: str = "会议室已预定。取消时需要 schedule_id（作为 meeting_id）和 booking_id。"
+
+
+class CancelRoomBookingResult(BaseModel):
+    """Structured MCP response for booking cancellation."""
+
+    ok: bool = True
+    message: str = "会议室预定已取消。"
