@@ -213,8 +213,8 @@ class WeComMailClient:
         raw_list = data.get("booking_list", [])
         return raw_list if isinstance(raw_list, list) else []
 
-    async def book_meeting_room(self, request: BookMeetingRoomRequest) -> tuple[str, str]:
-        """Book a meeting room. Returns (schedule_id, booking_id)."""
+    async def book_meeting_room(self, request: BookMeetingRoomRequest) -> str:
+        """Book a meeting room. Returns booking_id."""
 
         body = {
             "meetingroom_id": request.meetingroom_id,
@@ -229,15 +229,12 @@ class WeComMailClient:
             endpoint_name="meetingroom_book",
             json_body=body,
         )
-        schedule_id = self._require_string(
-            data, "schedule_id", "WeCom did not return schedule_id after booking."
-        )
         booking_id = self._require_string(
             data, "booking_id", "WeCom did not return booking_id after booking."
         )
-        return schedule_id, booking_id
+        return booking_id
 
-    async def cancel_room_booking(self, meeting_id: str, booking_id: str) -> None:
+    async def cancel_room_booking(self, booking_id: str) -> None:
         """Cancel a meeting room booking."""
 
         await self._request_authed(
@@ -245,7 +242,6 @@ class WeComMailClient:
             "/cgi-bin/oa/meetingroom/cancel_book",
             endpoint_name="meetingroom_cancel_book",
             json_body={
-                "meeting_id": meeting_id,
                 "booking_id": booking_id,
             },
         )

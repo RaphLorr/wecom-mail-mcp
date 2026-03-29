@@ -270,9 +270,8 @@ class BookMeetingRoomResult(BaseModel):
     """Structured MCP response for room booking."""
 
     ok: bool = True
-    schedule_id: str = Field(description="Used as meeting_id when cancelling.")
-    booking_id: str
-    message: str = "会议室已预定。取消时需要 schedule_id（作为 meeting_id）和 booking_id。"
+    booking_id: str = Field(description="取消预定时需要此 ID。")
+    message: str = "会议室已预定。取消时需要 booking_id。"
 
 
 class CancelRoomBookingResult(BaseModel):
