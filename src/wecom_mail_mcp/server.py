@@ -13,6 +13,9 @@ from .models import (
     BookMeetingRoomRequest,
     BookMeetingRoomResult,
     CancelRoomBookingResult,
+    Department,
+    Employee,
+    ListEmployeesResult,
     ListMeetingRoomsResult,
     MailboxInfoResult,
     MeetingRoom,
@@ -408,6 +411,63 @@ def create_server(settings: Settings) -> FastMCP[AppState]:
         await ctx.info(f"Cancelling booking {booking_id}")
         await state.client.cancel_room_booking(booking_id=booking_id.strip())
         return CancelRoomBookingResult()
+
+    # ------------------------------------------------------------------
+    # Tool: list_employees
+    # ------------------------------------------------------------------
+
+    @mcp.tool(
+        name="list_employees",
+        title="List Employees",
+        description=(
+            "获取应用可见范围内的所有员工信息，包括 userid、姓名、英文名、部门、职位、直属上级等。"
+            "注意：由于企业微信隐私策略限制，员工邮箱（email/biz_mail）无法通过此接口获取。"
+        ),
+    )
+    async def list_employees(ctx: Context) -> ListEmployeesResult:
+        state = _require_state(ctx)
+        await ctx.info("Fetching departments and employees")
+
+        raw_depts = await state.client.list_departments()
+        departments = [
+            Department(
+                id=d.get("id", 0),
+                name=d.get("name", ""),
+                parentid=d.get("parentid", 0),
+            )
+            for d in raw_depts
+            if isinstance(d, dict)
+        ]
+
+        seen_userids: set[str] = set()
+        employees: list[Employee] = []
+        for dept in departments:
+            raw_members = await state.client.list_department_members(dept.id)
+            for m in raw_members:
+                if not isinstance(m, dict):
+                    continue
+                uid = m.get("userid", "")
+                if uid in seen_userids:
+                    continue
+                seen_userids.add(uid)
+                employees.append(Employee(
+                    userid=uid,
+                    name=m.get("name", ""),
+                    english_name=m.get("english_name", ""),
+                    alias=m.get("alias", ""),
+                    department=m.get("department", []),
+                    main_department=m.get("main_department", 0),
+                    position=m.get("position", ""),
+                    status=m.get("status", 1),
+                    is_leader_in_dept=m.get("is_leader_in_dept", []),
+                    direct_leader=m.get("direct_leader", []),
+                ))
+
+        return ListEmployeesResult(
+            departments=departments,
+            employees=employees,
+            total=len(employees),
+        )
 
     return mcp
 

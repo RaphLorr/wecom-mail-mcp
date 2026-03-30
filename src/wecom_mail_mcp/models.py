@@ -279,3 +279,44 @@ class CancelRoomBookingResult(BaseModel):
 
     ok: bool = True
     message: str = "会议室预定已取消。"
+
+
+# ---------------------------------------------------------------------------
+# Employee directory models
+# ---------------------------------------------------------------------------
+
+
+class Employee(BaseModel):
+    """An employee from WeCom directory."""
+
+    userid: str
+    name: str
+    english_name: str = ""
+    alias: str = ""
+    department: list[int] = Field(default_factory=list)
+    main_department: int = 0
+    position: str = ""
+    status: int = 1
+    is_leader_in_dept: list[int] = Field(default_factory=list)
+    direct_leader: list[str] = Field(default_factory=list)
+
+
+class Department(BaseModel):
+    """A department from WeCom directory."""
+
+    id: int
+    name: str
+    parentid: int = 0
+
+
+class ListEmployeesResult(BaseModel):
+    """Structured MCP response for employee listing."""
+
+    ok: bool = True
+    departments: list[Department] = Field(default_factory=list)
+    employees: list[Employee] = Field(default_factory=list)
+    total: int = 0
+    message: str = (
+        "注意：由于企业微信隐私策略限制，员工邮箱（email/biz_mail）无法通过 API 获取。"
+        "企业邮箱格式通常为 {userid}@企业域名，但可能存在错误，具体以邮箱管理员分配的邮箱为准。"
+    )

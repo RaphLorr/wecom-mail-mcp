@@ -247,6 +247,33 @@ class WeComMailClient:
         )
 
     # ------------------------------------------------------------------
+    # Employee directory
+    # ------------------------------------------------------------------
+
+    async def list_departments(self) -> list[dict[str, Any]]:
+        """List all departments."""
+
+        data = await self._request_authed(
+            "GET",
+            "/cgi-bin/department/list",
+            endpoint_name="department_list",
+        )
+        raw_list = data.get("department", [])
+        return raw_list if isinstance(raw_list, list) else []
+
+    async def list_department_members(self, department_id: int) -> list[dict[str, Any]]:
+        """List members in a department (non-recursive)."""
+
+        data = await self._request_authed(
+            "GET",
+            "/cgi-bin/user/list",
+            endpoint_name="user_list",
+            params_override={"department_id": str(department_id)},
+        )
+        raw_list = data.get("userlist", [])
+        return raw_list if isinstance(raw_list, list) else []
+
+    # ------------------------------------------------------------------
     # Token management (unchanged)
     # ------------------------------------------------------------------
 
@@ -257,24 +284,31 @@ class WeComMailClient:
         *,
         endpoint_name: str,
         json_body: dict[str, Any] | None = None,
+        params_override: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         token = await self._get_access_token()
+        params = {"access_token": token}
+        if params_override:
+            params.update(params_override)
         data = await self._request_json(
             method,
             path,
             endpoint_name=endpoint_name,
-            params={"access_token": token},
+            params=params,
             json_body=json_body,
         )
 
         errcode = self._coerce_errcode(data)
         if errcode in TOKEN_ERRCODES:
             token = await self._get_access_token(force_refresh=True)
+            params = {"access_token": token}
+            if params_override:
+                params.update(params_override)
             data = await self._request_json(
                 method,
                 path,
                 endpoint_name=endpoint_name,
-                params={"access_token": token},
+                params=params,
                 json_body=json_body,
             )
 
