@@ -59,6 +59,54 @@ def validate_time_range(start_time: int, end_time: int) -> None:
 # ---------------------------------------------------------------------------
 
 
+class AttachmentSpec(BaseModel):
+    """One attachment: where to read it, and what to call it in the mail.
+
+    `file_name` matters because the path is often not the name a human gave the
+    file — inbound chat media lands on disk under a generated UUID, so without
+    an explicit name the recipient sees `34ea5294-....xlsx`.
+    """
+
+    path: str = Field(description="Absolute path of the local file to attach.")
+    file_name: str | None = Field(
+        default=None,
+        description="Name shown in the mail. Defaults to the file's own name on disk.",
+    )
+
+    @field_validator("path")
+    @classmethod
+    def _validate_path(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("Attachment path cannot be empty")
+        return cleaned
+
+    @field_validator("file_name")
+    @classmethod
+    def _validate_file_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        # A display name, not a location: keep separators and traversal out of it.
+        if any(sep in cleaned for sep in ("/", "\\", "\x00")) or cleaned in {".", ".."}:
+            raise ValueError(f"file_name must be a bare file name, got: {value}")
+        return cleaned
+
+
+def normalize_attachment(value: object) -> AttachmentSpec:
+    """Accept either a bare path or a {path, file_name} object."""
+
+    if isinstance(value, AttachmentSpec):
+        return value
+    if isinstance(value, str):
+        return AttachmentSpec(path=value)
+    if isinstance(value, dict):
+        return AttachmentSpec(**value)
+    raise ValueError(f"Attachment must be a path string or an object, got: {type(value).__name__}")
+
+
 class SendEmailRequest(BaseModel):
     """Validated input for a single outbound email."""
 
@@ -66,18 +114,17 @@ class SendEmailRequest(BaseModel):
     subject: str = Field(description="Email subject.")
     content: str = Field(description="Email body.")
     content_type: str = Field(default="text", description="Body type: text or html.")
-    attachments: list[str] = Field(
+    attachments: list[AttachmentSpec] = Field(
         default_factory=list,
-        description="Absolute paths of local files to attach.",
+        description="Files to attach: a path, or {path, file_name}.",
     )
 
-    @field_validator("attachments")
+    @field_validator("attachments", mode="before")
     @classmethod
-    def _validate_attachments(cls, value: list[str]) -> list[str]:
-        cleaned = [item.strip() for item in value]
-        if any(not item for item in cleaned):
-            raise ValueError("Attachment paths cannot be empty")
-        return cleaned
+    def _normalize_attachments(cls, value: object) -> object:
+        if isinstance(value, list):
+            return [normalize_attachment(item) for item in value]
+        return value
 
     @field_validator("to_email")
     @classmethod

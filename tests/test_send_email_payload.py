@@ -122,3 +122,40 @@ class SendEmailPayloadTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class AttachmentDisplayNameWiringTests(SendEmailPayloadTests):
+    async def test_display_name_reaches_the_payload(self) -> None:
+        target = self.allowed / "34ea5294-2a12-477c-afae-e222879caa5d.xlsx"
+        target.write_bytes(b"xlsx")
+        client = self._client(str(self.allowed))
+
+        captured = await self._capture(
+            client,
+            SendEmailRequest(
+                to_email="a@b.com",
+                subject="s",
+                content="hello",
+                attachments=[
+                    {"path": str(target), "file_name": "2026企业微信假期余额模板.xlsx"}
+                ],
+            ),
+        )
+
+        entry = captured["body"]["attachment_list"][0]
+        self.assertEqual(entry["file_name"], "2026企业微信假期余额模板.xlsx")
+        self.assertEqual(base64.b64decode(entry["content"]), b"xlsx")
+
+    async def test_uuid_name_survives_when_no_display_name_is_given(self) -> None:
+        target = self.allowed / "34ea5294-2a12-477c-afae-e222879caa5d.xlsx"
+        target.write_bytes(b"xlsx")
+        client = self._client(str(self.allowed))
+
+        captured = await self._capture(
+            client,
+            SendEmailRequest(
+                to_email="a@b.com", subject="s", content="hello", attachments=[str(target)]
+            ),
+        )
+
+        self.assertEqual(captured["body"]["attachment_list"][0]["file_name"], target.name)

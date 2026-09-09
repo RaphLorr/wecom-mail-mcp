@@ -22,6 +22,7 @@ from .models import (
     MeetingRoom,
     QueryRoomAvailabilityResult,
     RoomBookingInfo,
+    AttachmentSpec,
     SendEmailRequest,
     SendEmailResult,
     SendMeetingEmailRequest,
@@ -80,10 +81,16 @@ EmailContentType = Annotated[
     ),
 ]
 EmailAttachments = Annotated[
-    list[str] | None,
+    list[str | AttachmentSpec] | None,
     Field(
         description=(
-            "附件的本机绝对路径列表，例如 ['/path/to/report.csv']。"
+            "附件列表。每项可以是本机绝对路径，也可以是 {path, file_name}。"
+            "【收件人看到的文件名就是 file_name】不传 file_name 就用磁盘上的文件名，"
+            "而聊天工具收到的文件在磁盘上通常是一串 UUID（如 34ea5294-….xlsx），"
+            "直接发出去收件人看到的就是那串 UUID。所以只要你知道这个文件本来的名字，"
+            "就一定要传 file_name——比如先用文件检索工具拿到原始文件名，再连同路径一起传："
+            "[{'path': '/root/.openclaw/media/inbound/34ea5294-….xlsx', "
+            "'file_name': '2026企业微信假期余额模板.xlsx'}]。"
             "服务端自己读取文件并 base64 编码，调用方不要自己编码、也不需要外部图床。"
             "只允许读取管理员配置的目录（WECOM_ATTACHMENT_ROOTS），其它路径一律拒绝。"
             "附件最多 200 个，所有附件加正文不超过 50M。"
@@ -132,7 +139,8 @@ def create_server(settings: Settings) -> FastMCP[AppState]:
         name="send_email",
         title="Send Email",
         description=(
-            "通过企业微信官方邮件 API 发送普通邮件，支持附件（attachments 传本机绝对路径）。"
+            "通过企业微信官方邮件 API 发送普通邮件，支持附件"
+            "（attachments 传本机绝对路径；文件本来的名字用 file_name 一起传，否则收件人看到的是磁盘上的 UUID 名）。"
             "发件人固定为当前应用邮箱账号。"
             f"{HTML_EMAIL_GUIDANCE}"
         ),
@@ -164,7 +172,9 @@ def create_server(settings: Settings) -> FastMCP[AppState]:
             to_email=request.to_email,
             subject=request.subject,
             content_type=request.content_type,
-            attachments=[Path(item).name for item in request.attachments],
+            attachments=[
+                item.file_name or Path(item.path).name for item in request.attachments
+            ],
         )
 
     # ------------------------------------------------------------------

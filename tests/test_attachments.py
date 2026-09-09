@@ -15,6 +15,7 @@ from wecom_mail_mcp.attachments import (
     resolve_attachment_path,
 )
 from wecom_mail_mcp.config import Settings, load_settings
+from wecom_mail_mcp.models import AttachmentSpec, SendEmailRequest, normalize_attachment
 
 
 class ResolveAttachmentPathTests(unittest.TestCase):
@@ -162,3 +163,73 @@ class SettingsAttachmentRootsTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class DisplayNameTests(unittest.TestCase):
+    """The recipient sees file_name, which is often not the on-disk name."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name).resolve()
+        self.addCleanup(self._tmp.cleanup)
+
+    def _uuid_file(self) -> Path:
+        target = self.root / "34ea5294-2a12-477c-afae-e222879caa5d.xlsx"
+        target.write_bytes(b"xlsx-bytes")
+        return target
+
+    def test_falls_back_to_the_name_on_disk(self) -> None:
+        target = self._uuid_file()
+
+        items = build_attachment_list([str(target)], [str(self.root)])
+
+        self.assertEqual(items[0]["file_name"], target.name)
+
+    def test_uses_the_explicit_name_when_given(self) -> None:
+        target = self._uuid_file()
+        spec = AttachmentSpec(path=str(target), file_name="2026企业微信假期余额模板.xlsx")
+
+        items = build_attachment_list([spec], [str(self.root)])
+
+        self.assertEqual(items[0]["file_name"], "2026企业微信假期余额模板.xlsx")
+        self.assertEqual(base64.b64decode(items[0]["content"]), b"xlsx-bytes")
+
+    def test_a_blank_explicit_name_falls_back(self) -> None:
+        target = self._uuid_file()
+        spec = AttachmentSpec(path=str(target), file_name="   ")
+
+        items = build_attachment_list([spec], [str(self.root)])
+
+        self.assertEqual(items[0]["file_name"], target.name)
+
+    def test_rejects_a_path_as_the_display_name(self) -> None:
+        for bad in ("../../etc/passwd", "a/b.txt", "a\\b.txt", "..", "."):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(ValueError, "bare file name"):
+                    AttachmentSpec(path="/tmp/x.txt", file_name=bad)
+
+
+class NormalizeAttachmentTests(unittest.TestCase):
+    def test_accepts_a_bare_path(self) -> None:
+        spec = normalize_attachment("/tmp/report.csv")
+        self.assertEqual(spec.path, "/tmp/report.csv")
+        self.assertIsNone(spec.file_name)
+
+    def test_accepts_an_object(self) -> None:
+        spec = normalize_attachment({"path": "/tmp/x.bin", "file_name": "报表.xlsx"})
+        self.assertEqual(spec.file_name, "报表.xlsx")
+
+    def test_rejects_other_shapes(self) -> None:
+        with self.assertRaisesRegex(ValueError, "path string or an object"):
+            normalize_attachment(42)
+
+    def test_request_normalizes_mixed_input(self) -> None:
+        request = SendEmailRequest(
+            to_email="a@b.com",
+            subject="s",
+            content="c",
+            attachments=["/tmp/a.txt", {"path": "/tmp/b.bin", "file_name": "b.xlsx"}],
+        )
+
+        self.assertEqual([a.path for a in request.attachments], ["/tmp/a.txt", "/tmp/b.bin"])
+        self.assertEqual([a.file_name for a in request.attachments], [None, "b.xlsx"])

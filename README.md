@@ -64,6 +64,7 @@
     不加白名单就等于把「读任意文件并外发」的能力交给调用方。
   - 软链接会先解析再比对，所以白名单目录里放一个指向外部的软链接也绕不过去。
   - 例：`WECOM_ATTACHMENT_ROOTS=/srv/app/output:/srv/app/media`
+  - 附件的每一项可以是路径字符串，也可以是 `{path, file_name}`。**收件人看到的是 `file_name`**；聊天工具收到的文件在磁盘上常常是一串 UUID，不传 `file_name` 收件人就会看到那串 UUID。
 
 ## 本地运行
 

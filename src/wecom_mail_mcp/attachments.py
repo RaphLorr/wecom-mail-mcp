@@ -60,30 +60,38 @@ def resolve_attachment_path(path: str, allowed_roots: Iterable[str]) -> Path:
     return resolved
 
 
+def attachment_display_name(spec: object, resolved: Path) -> str:
+    """The name the recipient sees: the caller's, else the file's own."""
+
+    explicit = getattr(spec, "file_name", None)
+    return explicit or resolved.name
+
+
 def build_attachment_list(
-    paths: Sequence[str],
+    specs: Sequence[object],
     allowed_roots: Iterable[str],
     *,
     body_bytes: int = 0,
 ) -> list[dict[str, str]]:
-    """Read each path and return the API's `attachment_list` payload.
+    """Read each attachment and return the API's `attachment_list` payload.
 
     Raises rather than skipping: a silently dropped attachment is worse than a
     failed send, because the caller reports the mail as sent with the file on it.
     """
 
-    if not paths:
+    if not specs:
         return []
-    if len(paths) > MAX_ATTACHMENT_COUNT:
+    if len(specs) > MAX_ATTACHMENT_COUNT:
         raise AttachmentError(
-            f"Too many attachments: {len(paths)} (the API allows at most {MAX_ATTACHMENT_COUNT})"
+            f"Too many attachments: {len(specs)} (the API allows at most {MAX_ATTACHMENT_COUNT})"
         )
 
     roots = list(allowed_roots)
     total = body_bytes
     items: list[dict[str, str]] = []
-    for path in paths:
-        resolved = resolve_attachment_path(path, roots)
+    for spec in specs:
+        path = getattr(spec, "path", spec)
+        resolved = resolve_attachment_path(str(path), roots)
         try:
             raw = resolved.read_bytes()
         except OSError as exc:
@@ -96,5 +104,7 @@ def build_attachment_list(
                 "Attachments plus body exceed the 50M limit "
                 f"(reached {total} bytes at {resolved.name})"
             )
-        items.append({"file_name": resolved.name, "content": encoded})
+        items.append(
+            {"file_name": attachment_display_name(spec, resolved), "content": encoded}
+        )
     return items
