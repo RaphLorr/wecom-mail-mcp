@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Literal
 
 from pydantic import AliasChoices, Field, SecretStr, ValidationError, field_validator
@@ -69,6 +70,23 @@ class Settings(BaseSettings):
         default="INFO",
         validation_alias=AliasChoices("WECOM_LOG_LEVEL"),
     )
+    wecom_attachment_roots: str = Field(
+        default="",
+        validation_alias=AliasChoices("WECOM_ATTACHMENT_ROOTS"),
+        description=(
+            "Directories attachments may be read from, separated by the platform path "
+            "separator. Empty (the default) disables attachments entirely."
+        ),
+    )
+
+    @property
+    def attachment_roots(self) -> tuple[str, ...]:
+        """Allowed attachment directories, empty when the feature is off."""
+
+        raw = self.wecom_attachment_roots.strip()
+        if not raw:
+            return ()
+        return tuple(part.strip() for part in raw.split(os.pathsep) if part.strip())
 
     @field_validator("wecom_corp_id", "wecom_corp_secret", "wecom_mcp_host", mode="before")
     @classmethod

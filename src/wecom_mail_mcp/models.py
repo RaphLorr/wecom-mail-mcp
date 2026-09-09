@@ -66,6 +66,18 @@ class SendEmailRequest(BaseModel):
     subject: str = Field(description="Email subject.")
     content: str = Field(description="Email body.")
     content_type: str = Field(default="text", description="Body type: text or html.")
+    attachments: list[str] = Field(
+        default_factory=list,
+        description="Absolute paths of local files to attach.",
+    )
+
+    @field_validator("attachments")
+    @classmethod
+    def _validate_attachments(cls, value: list[str]) -> list[str]:
+        cleaned = [item.strip() for item in value]
+        if any(not item for item in cleaned):
+            raise ValueError("Attachment paths cannot be empty")
+        return cleaned
 
     @field_validator("to_email")
     @classmethod
@@ -108,6 +120,7 @@ class SendEmailResult(BaseModel):
     to_email: str
     subject: str
     content_type: str
+    attachments: list[str] = Field(default_factory=list)
     message: str = "邮件已通过企业微信官方邮件 API 发送。"
 
 

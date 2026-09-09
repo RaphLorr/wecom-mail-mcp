@@ -7,6 +7,7 @@ from typing import Any
 
 import httpx
 
+from .attachments import build_attachment_list
 from .config import Settings
 from .errors import WeComAPIError, WeComClientError, WeComResponseError
 from .models import (
@@ -72,12 +73,19 @@ class WeComMailClient:
 
     async def send_email(self, request: SendEmailRequest) -> MailboxInfo:
         mailbox = await self.get_mailbox_info()
-        payload = {
+        payload: dict[str, object] = {
             "to": {"emails": [request.to_email]},
             "subject": request.subject,
             "content": request.content,
             "content_type": request.content_type,
         }
+        attachment_list = build_attachment_list(
+            request.attachments,
+            self._settings.attachment_roots,
+            body_bytes=len(request.content.encode("utf-8")),
+        )
+        if attachment_list:
+            payload["attachment_list"] = attachment_list
         await self._request_authed(
             "POST",
             "/cgi-bin/exmail/app/compose_send",

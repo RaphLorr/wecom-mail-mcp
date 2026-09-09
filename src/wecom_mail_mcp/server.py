@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Annotated
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -78,6 +79,19 @@ EmailContentType = Annotated[
         )
     ),
 ]
+EmailAttachments = Annotated[
+    list[str] | None,
+    Field(
+        description=(
+            "附件的本机绝对路径列表，例如 ['/path/to/report.csv']。"
+            "服务端自己读取文件并 base64 编码，调用方不要自己编码、也不需要外部图床。"
+            "只允许读取管理员配置的目录（WECOM_ATTACHMENT_ROOTS），其它路径一律拒绝。"
+            "附件最多 200 个，所有附件加正文不超过 50M。"
+            "任何一个附件读不到或不被允许都会直接报错，不会静默跳过——"
+            "报错时如实转达，不要改用其它方式发送。"
+        )
+    ),
+]
 
 
 @dataclass(slots=True)
@@ -118,7 +132,8 @@ def create_server(settings: Settings) -> FastMCP[AppState]:
         name="send_email",
         title="Send Email",
         description=(
-            "通过企业微信官方邮件 API 发送普通邮件。发件人固定为当前应用邮箱账号。"
+            "通过企业微信官方邮件 API 发送普通邮件，支持附件（attachments 传本机绝对路径）。"
+            "发件人固定为当前应用邮箱账号。"
             f"{HTML_EMAIL_GUIDANCE}"
         ),
     )
@@ -128,6 +143,7 @@ def create_server(settings: Settings) -> FastMCP[AppState]:
         content: EmailContent,
         ctx: Context,
         content_type: EmailContentType = "text",
+        attachments: EmailAttachments = None,
     ) -> SendEmailResult:
         try:
             request = SendEmailRequest(
@@ -135,6 +151,7 @@ def create_server(settings: Settings) -> FastMCP[AppState]:
                 subject=subject,
                 content=content,
                 content_type=content_type,
+                attachments=attachments or [],
             )
         except ValidationError as exc:
             raise ValueError(summarize_validation_error(exc)) from exc
@@ -147,6 +164,7 @@ def create_server(settings: Settings) -> FastMCP[AppState]:
             to_email=request.to_email,
             subject=request.subject,
             content_type=request.content_type,
+            attachments=[Path(item).name for item in request.attachments],
         )
 
     # ------------------------------------------------------------------

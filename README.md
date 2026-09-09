@@ -31,6 +31,7 @@
 
 - 获取 access_token: <https://developer.work.weixin.qq.com/document/path/91039>
 - 发送普通邮件: <https://developer.work.weixin.qq.com/document/path/97445>
+  - 附件：`attachment_list[].file_name` + `attachment_list[].content`（base64）；最多 200 个，所有附件加正文不超过 50M
 - 查询应用邮箱账号: <https://developer.work.weixin.qq.com/document/path/97991>
 
 ## 环境变量 / `.env`
@@ -57,6 +58,12 @@
 - `WECOM_MCP_HOST`，默认 `127.0.0.1`
 - `WECOM_MCP_PORT`，默认 `8000`
 - `WECOM_LOG_LEVEL`，默认 `INFO`
+- `WECOM_ATTACHMENT_ROOTS`，默认空
+  - `send_email` 的附件只允许从这些目录里读取，多个目录用系统路径分隔符隔开（Linux/macOS 是 `:`，Windows 是 `;`）。
+  - **留空 = 完全禁用附件**。这是故意的：附件是唯一由调用方指定任意文件、并把它发出本机的入口，
+    不加白名单就等于把「读任意文件并外发」的能力交给调用方。
+  - 软链接会先解析再比对，所以白名单目录里放一个指向外部的软链接也绕不过去。
+  - 例：`WECOM_ATTACHMENT_ROOTS=/srv/app/output:/srv/app/media`
 
 ## 本地运行
 
