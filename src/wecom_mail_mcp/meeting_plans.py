@@ -6,7 +6,10 @@ an ambiguous write, and hold a process-shared lock across every processing pass.
 
 from __future__ import annotations
 
-import fcntl
+try:
+    import fcntl
+except ImportError:  # Keep the original mail tools importable on Windows.
+    fcntl = None
 import hashlib
 import json
 import os
@@ -122,6 +125,8 @@ class PlanStore:
 
     @contextmanager
     def exclusive(self):
+        if fcntl is None:
+            raise RuntimeError("Managed meeting plans require POSIX file locking; existing mail tools remain available")
         with open(str(self.path) + ".lock", "a") as lock:
             os.chmod(str(self.path) + ".lock", 0o600)
             try:
