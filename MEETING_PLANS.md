@@ -60,6 +60,13 @@ room reservations may still be pending. A location string never reserves a room.
 
 ## Rolling room reservations
 
+- Availability reads query the full Beijing day (00:00:00–23:59:59), then locally
+  filter bookings with `existing_start < requested_end` and
+  `existing_end > requested_start`. This avoids the provider omitting bookings
+  that cross a narrow query boundary. Adjacent bookings do not conflict. The same
+  logic serves the query tool and managed worker; missing/malformed room data is
+  an error, not proof of availability. Availability is a precheck, not a lock;
+  the booking API may still reject if someone reserves the room concurrently.
 - `WECOM_ROOM_ADVANCE_DAYS` defaults to 30. Configure it to the actual room policy;
   this does not override WeCom's server-side booking restrictions.
 - Dates outside this window are `pending_window` with an `eligible_at` timestamp.

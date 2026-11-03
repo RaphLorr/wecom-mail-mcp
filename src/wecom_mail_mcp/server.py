@@ -482,7 +482,8 @@ def create_server(settings: Settings) -> FastMCP[AppState]:
         description=(
             "查询会议室在指定时间段内的预定情况。"
             "时间范围不能跨天（API 限制）。可按会议室 ID 或位置筛选。"
-            "返回的 schedule 为空数组表示该时段空闲。"
+            "服务端查询北京时间当天完整预订，再本地筛选与目标时段重叠的记录，避免漏掉跨越查询边界的预订。"
+            "返回房间的 schedule 为空数组表示预查未发现冲突；最终以订房接口结果为准。"
         ),
     )
     async def query_room_availability(
@@ -496,14 +497,6 @@ def create_server(settings: Settings) -> FastMCP[AppState]:
         building: OptionalBuilding = "",
         floor: OptionalFloor = "",
     ) -> QueryRoomAvailabilityResult:
-        import datetime
-
-        beijing_tz = datetime.timezone(datetime.timedelta(hours=8))
-        start_date = datetime.datetime.fromtimestamp(start_time, tz=beijing_tz).date()
-        end_date = datetime.datetime.fromtimestamp(end_time, tz=beijing_tz).date()
-        if start_date != end_date:
-            raise ValueError("查询时间范围不能跨天（北京时间，企业微信 API 限制）")
-
         state = _require_state(ctx)
         await ctx.info("Querying room availability")
         raw_list = await state.client.query_room_availability(

@@ -23,6 +23,7 @@ from .models import (
     SendMeetingEmailRequest,
     SendScheduleEmailRequest,
 )
+from .room_availability import daily_booking_window, overlapping_bookings
 
 TOKEN_ERRCODES = {40001, 40014, 42001}
 
@@ -212,9 +213,12 @@ class WeComMailClient:
         building: str = "",
         floor: str = "",
     ) -> list[dict[str, Any]]:
+        day_start, day_end = daily_booking_window(start_time, end_time)
+        if meetingroom_id is not None and meetingroom_id <= 0:
+            raise ValueError("meetingroom_id must be positive")
         body: dict[str, Any] = {
-            "start_time": start_time,
-            "end_time": end_time,
+            "start_time": day_start,
+            "end_time": day_end,
         }
         if meetingroom_id is not None:
             body["meetingroom_id"] = meetingroom_id
@@ -231,8 +235,9 @@ class WeComMailClient:
             endpoint_name="meetingroom_get_booking_info",
             json_body=body,
         )
-        raw_list = data.get("booking_list", [])
-        return raw_list if isinstance(raw_list, list) else []
+        return overlapping_bookings(
+            data.get("booking_list"), start_time, end_time, meetingroom_id
+        )
 
     async def book_meeting_room(self, request: BookMeetingRoomRequest) -> str:
         """Book a meeting room. Returns booking_id."""
