@@ -65,14 +65,26 @@ room reservations may still be pending. A location string never reserves a room.
 - Dates outside this window are `pending_window` with an `eligible_at` timestamp.
   The worker checks availability and books them when eligible. It never books an
   alternative room without an explicit new user decision.
-- Explicit booking API rejections retry at most three write attempts, separated by
-  at least one hour. Conflicts require a user-requested retry with
-  `retry_managed_room_booking(plan_id,start_time)`.
+- Only explicit transient API rejections (`-1` system busy, `45009` rate limit)
+  and transport failures during availability reads automatically retry. At most
+  three failures per occurrence, separated by at least one hour; failed reads
+  count toward the same limit. Parameter errors (`40058`), permission errors and
+  other business rejections become `failed` immediately, with no scheduled retry.
+  Existing `retry` records carrying a non-transient API code stop at the next
+  worker pass before another request. Conflicts and corrected definite failures
+  require a user-requested `retry_managed_room_booking(plan_id,start_time)`.
 - Timeouts, malformed responses after a write, and unfinished writes after a crash
   become `unknown`. They are not automatically retried: compare actual provider
   records before an operator reconciles the stored outcome. Invitation failures
   also do not trigger automatic resends.
 - Availability query failures are never treated as proof that a room is empty.
+- `room_error_detail` retains the failure phase, error type, API endpoint/code,
+  sanitized provider `errmsg`, retry eligibility and room/time parameters.
+  Credential assignments and URLs are redacted; generic exception messages and
+  request tracebacks are not copied into diagnostics. No full request, invitation
+  body, credentials or token-bearing URL is recorded. Details also appear in
+  organizer failure alerts. Successful recovery clears stale errors. Older
+  code-only records cannot recover provider explanations that were never saved.
 - `get_managed_meeting` reports one series-level `invite` outcome, room counts,
   worker health and per-occurrence booking IDs. `complete=true` requires all rooms
   booked and the one invitation confirmed sent. `list_managed_meetings` finds

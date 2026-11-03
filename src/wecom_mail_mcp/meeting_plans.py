@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 from pydantic import Field, model_validator
 
 from .errors import WeComAPIError
+from .meeting_errors import MAX_ROOM_FAILURES, TRANSIENT_ROOM_CODES, room_error_detail
 from .models import (
     BookMeetingRoomRequest,
     SendScheduleEmailRequest,
@@ -339,6 +340,16 @@ class MeetingPlans:
             if value == "sending":
                 plan["notices"][key] = "unknown"
         for row in plan["occurrences"]:
+            # Old records retained only an error code and retried every rejection.
+            # Stop known non-transient rejections before making another API call.
+            old_error = row.get("room_error", "")
+            if row["room"] == "retry" and old_error.startswith("WeComAPIError:"):
+                try:
+                    old_code = int(old_error.split(":", 1)[1])
+                except ValueError:
+                    old_code = None
+                if old_code is not None and old_code not in TRANSIENT_ROOM_CODES:
+                    row.update(room="failed", next_attempt=0)
             # Lock ownership proves no other live writer can still be making these writes.
             if row["room"] == "booking":
                 row["room"] = "unknown"
@@ -358,6 +369,7 @@ class MeetingPlans:
                 and row["room"] in ["pending", "pending_window", "retry"]
                 and row["next_attempt"] <= now
             ):
+                phase = "availability"
                 try:
                     bookings = await self.client.query_room_availability(
                         row["start_time"],
@@ -384,17 +396,22 @@ class MeetingPlans:
                             or "end_time" not in b
                         ):
                             raise ValueError("unrecognized booking entry")
-                    if any(
+                    conflicts = any(
                         int(b["start_time"]) < row["end_time"]
                         and int(b["end_time"]) > row["start_time"]
                         for b in schedule
-                    ):
+                    )
+                    if conflicts:
                         row["room"] = "conflict"
+                        row.pop("room_error", None)
+                        row.pop("room_error_detail", None)
+                        row["next_attempt"] = 0
                         self.store.save(plan)
                     else:
                         row["room"] = "booking"
                         row["attempts"] += 1
                         self.store.save(plan)
+                        phase = "booking"
                         booking_id = await self.client.book_meeting_room(
                             BookMeetingRoomRequest(
                                 meetingroom_id=request.meetingroom_id,
@@ -406,14 +423,31 @@ class MeetingPlans:
                         )
                         row["booking_id"] = booking_id
                         row["room"] = "booked"
+                        row.pop("room_error", None)
+                        row.pop("room_error_detail", None)
+                        row.update(failure_attempts=0, next_attempt=0)
                         self.store.save(plan)
                 except Exception as exc:
-                    # Only explicit business rejections are definite write failures.
-                    if row["room"] == "booking" and not isinstance(exc, WeComAPIError):
+                    detail = room_error_detail(exc, phase, request, row)
+                    row["failure_attempts"] = (
+                        row.get(
+                            "failure_attempts", row["attempts"] - (phase == "booking")
+                        )
+                        + 1
+                    )
+                    if detail["category"] == "unknown_write":
                         row["room"] = "unknown"
-                    else:
-                        row["room"] = "retry" if row["attempts"] < 3 else "failed"
+                        row["next_attempt"] = 0
+                    elif (
+                        detail["retryable"]
+                        and row["failure_attempts"] < MAX_ROOM_FAILURES
+                    ):
+                        row["room"] = "retry"
                         row["next_attempt"] = now + 3600
+                    else:
+                        row.update(room="failed", next_attempt=0)
+                        detail["retryable"] = False
+                    row["room_error_detail"] = detail
                     row["room_error"] = f"{type(exc).__name__}" + (
                         f":{exc.errcode}" if isinstance(exc, WeComAPIError) else ""
                     )
@@ -528,6 +562,11 @@ class MeetingPlans:
         zone = ZoneInfo(plan["request"]["timezone"])
         lines = [
             f"{datetime.fromtimestamp(row['start_time'], zone).isoformat()} {kind}={row[kind]}"
+            + (
+                " " + json.dumps(row["room_error_detail"], ensure_ascii=False)
+                if kind == "room" and row.get("room_error_detail")
+                else ""
+            )
             for _, row, kind in events
         ]
         try:
@@ -599,7 +638,9 @@ class MeetingPlans:
                 raise ValueError(
                     "仅允许重试明确失败/冲突的场次；unknown 必须先人工核实，不能盲目重订"
                 )
-            row.update(room="pending", attempts=0, next_attempt=0)
+            row.update(room="pending", attempts=0, failure_attempts=0, next_attempt=0)
+            row.pop("room_error", None)
+            row.pop("room_error_detail", None)
             self.store.save(plan)
             await self._process(plan)
             return self.status(plan_id)

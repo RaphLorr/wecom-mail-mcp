@@ -167,6 +167,8 @@ def create_server(settings: Settings) -> FastMCP[AppState]:
             "需明确用户已授权会议、收件人、会议室、周期结束日期及滚动补订。notify_email 必须是已确认的组织者邮箱。"
             "不要再按每场发送邮件；没有会议室需求时直接调用 send_schedule_email(repeat=...)，无需后台任务。"
             "只有返回 complete=true 才能声称全部订房和邀请成功；否则逐项报告 pending_window/conflict/failed/unknown。"
+            "订房错误详情见 room_error_detail；参数/权限等业务拒绝不自动重试，只有明确临时错误有限重试。"
+            "failed 需检查并修正原因；unknown 是写入结果不明，必须核对，不能盲目重订。"
             "同名地点 location 仅为文字，绝不能当成订房成功。worker 不健康时拒绝创建，避免承诺未来不会执行的补订。"
         )
     )

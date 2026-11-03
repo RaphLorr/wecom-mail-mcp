@@ -32,8 +32,10 @@ class FakeClient:
         self.invite_error = None
         self.read_error = None
         self.cancel_error = None
+        self.reads = 0
 
     async def query_room_availability(self, *args, **kwargs):
+        self.reads += 1
         if self.read_error:
             raise self.read_error
         return [
@@ -147,7 +149,7 @@ class MeetingPlansTests(unittest.IsolatedAsyncioTestCase):
     async def test_booking_rejection_is_partial_and_bounded_retry_does_not_resend_invite(
         self,
     ):
-        self.client.book_error = WeComAPIError("meetingroom_book", 42, "rejected")
+        self.client.book_error = WeComAPIError("meetingroom_book", -1, "system busy")
         result = await self.manager.create(self.request(until_date="2026-11-09"))
         self.assertEqual(result["counts"]["room_retry"], 1)
         for _ in range(3):
@@ -166,6 +168,106 @@ class MeetingPlansTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.client.booked), 1)
         with self.assertRaises(ValueError):
             await self.manager.retry_room(result["id"], ts("2026-11-09"))
+
+    async def test_parameter_rejection_is_diagnosed_redacted_and_not_retried(self):
+        self.client.book_error = WeComAPIError(
+            "meetingroom_book",
+            40058,
+            'invalid booker; access_token="secret-token" corpsecret=secret-value '
+            "https://example.test/book?access_token=hidden",
+        )
+        result = await self.manager.create(self.request(until_date="2026-11-09"))
+        row = result["occurrences"][0]
+        self.assertEqual(row["room"], "failed")
+        self.assertEqual(row["next_attempt"], 0)
+        detail = row["room_error_detail"]
+        self.assertEqual(detail["errcode"], 40058)
+        self.assertEqual(detail["endpoint"], "meetingroom_book")
+        self.assertEqual(detail["request"]["meetingroom_id"], 8)
+        self.assertIn("invalid booker", detail["errmsg"])
+        stored = self.store.get(result["id"])
+        rendered = str(stored) + str(self.client.notices)
+        for secret in (
+            "secret-token",
+            "secret-value",
+            "https://example.test",
+            "hidden",
+        ):
+            self.assertNotIn(secret, rendered)
+        self.now += 3601
+        await self.manager.tick()
+        self.assertEqual(len(self.client.booked), 1)
+        self.assertEqual(len(self.client.invites), 1)
+        # Explicit retry after correction succeeds without stale errors or new mail.
+        self.client.book_error = None
+        result = await self.manager.retry_room(result["id"], ts("2026-11-09"))
+        self.assertTrue(result["complete"])
+        self.assertNotIn("room_error_detail", result["occurrences"][0])
+        self.assertEqual(len(self.client.invites), 1)
+
+    async def test_unrecognized_business_rejection_does_not_loop(self):
+        self.client.book_error = WeComAPIError("meetingroom_book", 42, "rejected")
+        result = await self.manager.create(self.request(until_date="2026-11-09"))
+        self.assertEqual(result["occurrences"][0]["room"], "failed")
+        self.now += 3601
+        await self.manager.tick()
+        self.assertEqual(len(self.client.booked), 1)
+
+    async def test_rate_limit_can_recover_without_resending_invitation(self):
+        self.client.book_error = WeComAPIError("meetingroom_book", 45009, "rate limit")
+        result = await self.manager.create(self.request(until_date="2026-11-09"))
+        self.assertEqual(result["occurrences"][0]["room"], "retry")
+        self.assertTrue(result["occurrences"][0]["room_error_detail"]["retryable"])
+        self.client.book_error = None
+        await self.manager.tick()
+        self.assertEqual(len(self.client.booked), 1)  # Not due yet.
+        self.now += 3601
+        await self.manager.tick()
+        result = self.manager.status(result["id"])
+        self.assertTrue(result["complete"])
+        self.assertNotIn("room_error_detail", result["occurrences"][0])
+        self.assertEqual(len(self.client.invites), 1)
+
+    async def test_availability_transport_failures_are_bounded_without_booking(self):
+        self.client.read_error = TimeoutError(
+            "https://example.test/?access_token=hidden"
+        )
+        result = await self.manager.create(self.request(until_date="2026-11-09"))
+        for _ in range(4):
+            self.now += 3601
+            await self.manager.tick()
+        row = self.manager.status(result["id"])["occurrences"][0]
+        self.assertEqual(self.client.reads, 3)
+        self.assertEqual(row["room"], "failed")
+        self.assertEqual(row["failure_attempts"], 3)
+        self.assertEqual(self.client.booked, [])
+        self.assertNotIn("hidden", str(row))
+
+    async def test_availability_parameter_error_is_terminal_before_booking(self):
+        self.client.read_error = WeComAPIError(
+            "meetingroom_get_booking_info", 40058, "invalid time"
+        )
+        result = await self.manager.create(self.request(until_date="2026-11-09"))
+        self.assertEqual(result["occurrences"][0]["room"], "failed")
+        self.now += 3601
+        await self.manager.tick()
+        self.assertEqual(self.client.reads, 1)
+        self.assertEqual(self.client.booked, [])
+
+    async def test_old_parameter_retry_is_stopped_before_another_request(self):
+        self.client.conflict = True
+        result = await self.manager.create(self.request(until_date="2026-11-09"))
+        p = self.store.get(result["id"])
+        p["occurrences"][0].update(
+            room="retry", room_error="WeComAPIError:40058", next_attempt=0
+        )
+        self.store.save(p)
+        reads = self.client.reads
+        await self.manager.tick()
+        self.assertEqual(self.client.reads, reads)
+        self.assertEqual(
+            self.manager.status(result["id"])["occurrences"][0]["room"], "failed"
+        )
 
     async def test_invite_timeout_does_not_undo_booking_or_resend(self):
         self.client.invite_error = TimeoutError()

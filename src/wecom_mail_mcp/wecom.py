@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -9,7 +10,12 @@ import httpx
 
 from .attachments import build_attachment_list
 from .config import Settings
-from .errors import WeComAPIError, WeComClientError, WeComResponseError
+from .errors import (
+    CredentialLogFilter,
+    WeComAPIError,
+    WeComClientError,
+    WeComResponseError,
+)
 from .models import (
     BookMeetingRoomRequest,
     MailboxInfo,
@@ -34,6 +40,10 @@ class WeComMailClient:
     """Thin async client for the official WeCom mail API."""
 
     def __init__(self, settings: Settings):
+        # httpx logs full request URLs at INFO, including access_token/corpsecret.
+        http_logger = logging.getLogger("httpx")
+        if not any(isinstance(f, CredentialLogFilter) for f in http_logger.filters):
+            http_logger.addFilter(CredentialLogFilter())
         self._settings = settings
         self._client = httpx.AsyncClient(
             base_url=settings.wecom_api_base,
@@ -369,18 +379,18 @@ class WeComMailClient:
                 method, path, params=params, json=json_body
             )
             response.raise_for_status()
-        except httpx.TimeoutException as exc:
+        except httpx.TimeoutException:
             raise WeComClientError(
                 f"Request to WeCom API timed out at {endpoint_name}."
-            ) from exc
+            ) from None
         except httpx.HTTPStatusError as exc:
             raise WeComClientError(
                 f"WeCom API returned HTTP {exc.response.status_code} at {endpoint_name}."
-            ) from exc
-        except httpx.RequestError as exc:
+            ) from None
+        except httpx.RequestError:
             raise WeComClientError(
-                f"Unable to reach WeCom API at {endpoint_name}: {exc}"
-            ) from exc
+                f"Unable to reach WeCom API at {endpoint_name}."
+            ) from None
 
         try:
             data = response.json()
