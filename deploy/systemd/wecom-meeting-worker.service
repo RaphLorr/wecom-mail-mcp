@@ -1,0 +1,12 @@
+[Unit]
+Description=Reconcile managed WeCom meeting room reservations
+After=network-online.target
+ConditionPathExists=/root/.openclaw/openclaw.json
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root
+ExecStart=/opt/raph_dev/mcp_servers/wecom-mail-mcp/.venv/bin/python -m wecom_mail_mcp.meeting_worker --openclaw-config /root/.openclaw/openclaw.json
+TimeoutStartSec=30min
+UMask=0077
+NoNewPrivileges=true

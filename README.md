@@ -1,5 +1,8 @@
 # WeCom Mail MCP
 
+托管周期会议、逐场状态及会议室滚动补订见 [MEETING_PLANS.md](MEETING_PLANS.md)。
+日程邀请发送成功不代表会议室预约成功；原有 `location` 参数仅填写地点文字。
+
 一个基于 Python 的 MCP 服务端，通过企业微信官方邮件 API 发送普通邮件。
 
 它做的事情很简单：

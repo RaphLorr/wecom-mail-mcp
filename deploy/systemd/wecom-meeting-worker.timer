@@ -1,0 +1,11 @@
+[Unit]
+Description=Roll forward WeCom room bookings every 15 minutes
+
+[Timer]
+OnCalendar=*-*-* *:00/15:00
+OnBootSec=1min
+Persistent=true
+Unit=wecom-meeting-worker.service
+
+[Install]
+WantedBy=timers.target

@@ -31,21 +31,43 @@ from .models import (
     SendScheduleEmailResult,
 )
 from .wecom import WeComMailClient
+from .meeting_plans import MeetingPlans, PlanStore, WeeklyMeetingRequest
 
 # ---------------------------------------------------------------------------
 # Annotated type aliases for tool parameters
 # ---------------------------------------------------------------------------
 
-RecipientEmail = Annotated[str, Field(description="收件人邮箱地址，例如 user@example.com")]
-RecipientEmails = Annotated[list[str], Field(description="收件人邮箱地址列表，例如 ['user1@example.com', 'user2@example.com']")]
+RecipientEmail = Annotated[
+    str, Field(description="收件人邮箱地址，例如 user@example.com")
+]
+RecipientEmails = Annotated[
+    list[str],
+    Field(
+        description="收件人邮箱地址列表，例如 ['user1@example.com', 'user2@example.com']"
+    ),
+]
 EmailSubject = Annotated[str, Field(description="邮件主题")]
-MeetingLocation = Annotated[str, Field(description="会议地点，例如 '3楼 FRONTIER 会议室'")]
-StartTimestamp = Annotated[int, Field(description="开始时间，Unix 时间戳（秒）。注意时间以北京时间（UTC+8）为准。")]
-EndTimestamp = Annotated[int, Field(description="结束时间，Unix 时间戳（秒）。注意时间以北京时间（UTC+8）为准。")]
+MeetingLocation = Annotated[
+    str, Field(description="会议地点，例如 '3楼 FRONTIER 会议室'")
+]
+StartTimestamp = Annotated[
+    int,
+    Field(description="开始时间，Unix 时间戳（秒）。注意时间以北京时间（UTC+8）为准。"),
+]
+EndTimestamp = Annotated[
+    int,
+    Field(description="结束时间，Unix 时间戳（秒）。注意时间以北京时间（UTC+8）为准。"),
+]
 RemindBeforeMins = Annotated[int, Field(description="提前提醒分钟数，默认 15 分钟")]
-MeetingAdminUserid = Annotated[str, Field(description="会议管理员的企业微信 userid，严禁使用其他猜测 ID")]
-MeetingRoomId = Annotated[int, Field(description="会议室 ID，可通过 list_meeting_rooms 获取")]
-BookerUserid = Annotated[str, Field(description="预定人的企业微信 userid，严禁使用其他猜测 ID")]
+MeetingAdminUserid = Annotated[
+    str, Field(description="会议管理员的企业微信 userid，严禁使用其他猜测 ID")
+]
+MeetingRoomId = Annotated[
+    int, Field(description="会议室 ID，可通过 list_meeting_rooms 获取")
+]
+BookerUserid = Annotated[
+    str, Field(description="预定人的企业微信 userid，严禁使用其他猜测 ID")
+]
 OptionalCity = Annotated[str, Field(description="城市筛选（可选）")]
 OptionalBuilding = Annotated[str, Field(description="楼宇筛选（可选）")]
 OptionalFloor = Annotated[str, Field(description="楼层筛选（可选）")]
@@ -58,9 +80,9 @@ HTML_EMAIL_GUIDANCE = (
     "web font、相对路径和网页式复杂模板。图片请使用公网 https 绝对地址。"
 )
 HTML_EMAIL_TEMPLATE_HINT = (
-    'HTML 骨架建议：'
+    "HTML 骨架建议："
     '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">'
-    '<tr><td>'
+    "<tr><td>"
     '<h2 style="margin:0 0 16px;">标题</h2>'
     '<p style="margin:0 0 12px;">正文</p>'
     '<a href="https://example.com">链接</a>'
@@ -69,7 +91,9 @@ HTML_EMAIL_TEMPLATE_HINT = (
 )
 EmailContent = Annotated[
     str,
-    Field(description="邮件正文。默认纯文本。如需 HTML 请同时设置 content_type=html，使用 table 布局和 inline style。"),
+    Field(
+        description="邮件正文。默认纯文本。如需 HTML 请同时设置 content_type=html，使用 table 布局和 inline style。"
+    ),
 ]
 EmailContentType = Annotated[
     str,
@@ -123,6 +147,8 @@ def create_server(settings: Settings) -> FastMCP[AppState]:
         instructions=(
             "通过企业微信官方 API 发送邮件、日程邀请、会议邀请，以及管理会议室预定。"
             "发件人固定为当前应用邮箱账号。"
+            "涉及周期会议或需要后续补订会议室时，使用 create_managed_meeting 并明确它是逐场发送邀请；"
+            "不要把邮件成功、location 地点文字或部分订房成功当成全部完成。"
             f"{HTML_EMAIL_GUIDANCE}"
         ),
         lifespan=lifespan,
@@ -130,6 +156,93 @@ def create_server(settings: Settings) -> FastMCP[AppState]:
         port=settings.wecom_mcp_port,
         log_level=settings.wecom_log_level,
     )
+
+    @mcp.tool(
+        description=(
+            "创建托管会议计划：按首场会议的当地星期/时间每周重复到 until_date（含）。"
+            "也可把 until_date 设为首场日期创建单场。每场分别发送日程邀请，不是一个原生周期日程。"
+            "会议室只预约允许窗口内的日期，窗口外持久化待补订，由独立 worker 滚动处理。"
+            "request_id 使用原用户消息 ID，重试必须复用；不同参数不能复用同一 ID。"
+            "需明确用户已授权会议、收件人、会议室、周期结束日期及滚动补订。notify_email 必须是已确认的组织者邮箱。"
+            "调用前确认用户接受每场分别邀请；只需一次确认，不为每次自动补订反复询问。"
+            "只有返回 complete=true 才能声称全部订房和邀请成功；否则逐项报告 pending_window/conflict/failed/unknown。"
+            "同名地点 location 仅为文字，绝不能当成订房成功。worker 不健康时拒绝创建，避免承诺未来不会执行的补订。"
+        )
+    )
+    async def create_managed_meeting(plan: WeeklyMeetingRequest, ctx: Context) -> dict:
+        state = _require_state(ctx)
+        store = PlanStore(settings.wecom_meeting_store, settings.wecom_corp_id)
+        try:
+            return await MeetingPlans(
+                store, state.client, settings.wecom_room_advance_days
+            ).create(plan)
+        finally:
+            store.close()
+
+    @mcp.tool(
+        description="查询托管会议计划的每场邀请、订房、booking_id、待补订/冲突/失败状态及 worker 健康。只查询，不重新发送。"
+    )
+    async def get_managed_meeting(plan_id: str, ctx: Context) -> dict:
+        state = _require_state(ctx)
+        store = PlanStore(settings.wecom_meeting_store, settings.wecom_corp_id)
+        try:
+            return MeetingPlans(
+                store, state.client, settings.wecom_room_advance_days
+            ).status(plan_id)
+        finally:
+            store.close()
+
+    @mcp.tool(
+        description="列出当前企业应用存储的托管会议计划摘要，用于找回 plan_id；不发送邮件或预订。"
+    )
+    async def list_managed_meetings(ctx: Context) -> list[dict]:
+        _require_state(ctx)
+        store = PlanStore(settings.wecom_meeting_store, settings.wecom_corp_id)
+        try:
+            return [
+                {
+                    "plan_id": p["id"],
+                    "subject": p["request"]["subject"],
+                    "state": p["state"],
+                    "location": p["request"]["location"],
+                    "occurrences": len(p["occurrences"]),
+                }
+                for p in store.active()
+            ]
+        finally:
+            store.close()
+
+    @mcp.tool(
+        description=(
+            "取消托管计划及未来已知 booking_id 的会议室预订，停止所有未来补订。"
+            "需要用户明确要求取消。不会取消已发送的日历邀请，必须明确告知这一限制。"
+            "unknown 预订和取消失败项仍需核对，不能声称已全部取消。"
+        )
+    )
+    async def cancel_managed_meeting(plan_id: str, ctx: Context) -> dict:
+        state = _require_state(ctx)
+        store = PlanStore(settings.wecom_meeting_store, settings.wecom_corp_id)
+        try:
+            return await MeetingPlans(
+                store, state.client, settings.wecom_room_advance_days
+            ).cancel(plan_id)
+        finally:
+            store.close()
+
+    @mcp.tool(
+        description="用户要求重试时，重试托管计划中一个明确失败/冲突的会议室场次；不重复发送邀请。unknown 结果不允许盲目重试。"
+    )
+    async def retry_managed_room_booking(
+        plan_id: str, start_time: int, ctx: Context
+    ) -> dict:
+        state = _require_state(ctx)
+        store = PlanStore(settings.wecom_meeting_store, settings.wecom_corp_id)
+        try:
+            return await MeetingPlans(
+                store, state.client, settings.wecom_room_advance_days
+            ).retry_room(plan_id, start_time)
+        finally:
+            store.close()
 
     # ------------------------------------------------------------------
     # Tool: send_email
@@ -202,7 +315,8 @@ def create_server(settings: Settings) -> FastMCP[AppState]:
         name="send_schedule_email",
         title="Send Schedule Email",
         description=(
-            "【推荐】发送日程邀请邮件。收件人会在企业微信日历中收到日程邀请。"
+            "发送单场日程邀请邮件。收件人会在企业微信日历中收到日程邀请。"
+            "只发送单场邀请，不预订会议室；location 仅为文字。涉及周期和订房时优先 create_managed_meeting。"
             "适用于大多数会议邀请场景。如需创建腾讯会议（含会议链接），请使用 send_meeting_email。"
             "注意：此接口不支持取消已发送的日程邀请。"
         ),
@@ -268,8 +382,12 @@ def create_server(settings: Settings) -> FastMCP[AppState]:
         location: MeetingLocation = "",
         remind_before_mins: RemindBeforeMins = 15,
         content_type: EmailContentType = "text",
-        enable_waiting_room: Annotated[bool, Field(description="是否开启等候室")] = True,
-        allow_enter_before_host: Annotated[bool, Field(description="是否允许在主持人之前入会")] = True,
+        enable_waiting_room: Annotated[
+            bool, Field(description="是否开启等候室")
+        ] = True,
+        allow_enter_before_host: Annotated[
+            bool, Field(description="是否允许在主持人之前入会")
+        ] = True,
     ) -> SendMeetingEmailResult:
         try:
             request = SendMeetingEmailRequest(
@@ -317,7 +435,9 @@ def create_server(settings: Settings) -> FastMCP[AppState]:
         state = _require_state(ctx)
         await ctx.info("Listing meeting rooms")
         raw_rooms = await state.client.list_meeting_rooms(
-            city=city, building=building, floor=floor,
+            city=city,
+            building=building,
+            floor=floor,
         )
         rooms = [
             MeetingRoom(
@@ -349,12 +469,15 @@ def create_server(settings: Settings) -> FastMCP[AppState]:
         start_time: StartTimestamp,
         end_time: EndTimestamp,
         ctx: Context,
-        meetingroom_id: Annotated[int | None, Field(description="会议室 ID（可选，不传则查询所有）")] = None,
+        meetingroom_id: Annotated[
+            int | None, Field(description="会议室 ID（可选，不传则查询所有）")
+        ] = None,
         city: OptionalCity = "",
         building: OptionalBuilding = "",
         floor: OptionalFloor = "",
     ) -> QueryRoomAvailabilityResult:
         import datetime
+
         beijing_tz = datetime.timezone(datetime.timedelta(hours=8))
         start_date = datetime.datetime.fromtimestamp(start_time, tz=beijing_tz).date()
         end_date = datetime.datetime.fromtimestamp(end_time, tz=beijing_tz).date()
@@ -429,7 +552,9 @@ def create_server(settings: Settings) -> FastMCP[AppState]:
         description="取消会议室预定。需要传入预定时返回的 booking_id。",
     )
     async def cancel_room_booking(
-        booking_id: Annotated[str, Field(description="预定时 book_meeting_room 返回的 booking_id")],
+        booking_id: Annotated[
+            str, Field(description="预定时 book_meeting_room 返回的 booking_id")
+        ],
         ctx: Context,
     ) -> CancelRoomBookingResult:
         if not booking_id.strip():
@@ -478,18 +603,20 @@ def create_server(settings: Settings) -> FastMCP[AppState]:
                 if uid in seen_userids:
                     continue
                 seen_userids.add(uid)
-                employees.append(Employee(
-                    userid=uid,
-                    name=m.get("name", ""),
-                    english_name=m.get("english_name", ""),
-                    alias=m.get("alias", ""),
-                    department=m.get("department", []),
-                    main_department=m.get("main_department", 0),
-                    position=m.get("position", ""),
-                    status=m.get("status", 1),
-                    is_leader_in_dept=m.get("is_leader_in_dept", []),
-                    direct_leader=m.get("direct_leader", []),
-                ))
+                employees.append(
+                    Employee(
+                        userid=uid,
+                        name=m.get("name", ""),
+                        english_name=m.get("english_name", ""),
+                        alias=m.get("alias", ""),
+                        department=m.get("department", []),
+                        main_department=m.get("main_department", 0),
+                        position=m.get("position", ""),
+                        status=m.get("status", 1),
+                        is_leader_in_dept=m.get("is_leader_in_dept", []),
+                        direct_leader=m.get("direct_leader", []),
+                    )
+                )
 
         return ListEmployeesResult(
             departments=departments,

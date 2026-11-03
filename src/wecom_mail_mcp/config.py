@@ -4,7 +4,11 @@ import os
 from typing import Literal
 
 from pydantic import AliasChoices, Field, SecretStr, ValidationError, field_validator
-from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
 
 from .errors import WeComConfigurationError
 
@@ -78,6 +82,17 @@ class Settings(BaseSettings):
             "separator. Empty (the default) disables attachments entirely."
         ),
     )
+    wecom_meeting_store: str = Field(
+        default="~/.local/share/wecom-mail-mcp/meeting-plans.sqlite",
+        validation_alias="WECOM_MEETING_STORE",
+    )
+    wecom_room_advance_days: int = Field(
+        default=30,
+        ge=1,
+        le=366,
+        validation_alias="WECOM_ROOM_ADVANCE_DAYS",
+        description="Operator-configured rolling room booking window; API restrictions still apply.",
+    )
 
     @property
     def attachment_roots(self) -> tuple[str, ...]:
@@ -88,7 +103,9 @@ class Settings(BaseSettings):
             return ()
         return tuple(part.strip() for part in raw.split(os.pathsep) if part.strip())
 
-    @field_validator("wecom_corp_id", "wecom_corp_secret", "wecom_mcp_host", mode="before")
+    @field_validator(
+        "wecom_corp_id", "wecom_corp_secret", "wecom_mcp_host", mode="before"
+    )
     @classmethod
     def _strip_required_strings(cls, value: object) -> object:
         if isinstance(value, str):
