@@ -100,10 +100,12 @@ class MeetingPlansTests(unittest.IsolatedAsyncioTestCase):
         data.update(kw)
         return WeeklyMeetingRequest(**data)
 
-    async def test_only_open_window_is_booked_but_all_invites_are_recorded(self):
+    async def test_only_open_window_is_booked_and_one_native_repeat_invite_is_sent(
+        self,
+    ):
         result = await self.manager.create(self.request())
         self.assertEqual(len(self.client.booked), 4)
-        self.assertEqual(len(self.client.invites), 8)
+        self.assertEqual(len(self.client.invites), 1)
         self.assertEqual(result["counts"]["room_pending_window"], 4)
         self.assertFalse(result["complete"])
         self.assertTrue(
@@ -117,7 +119,7 @@ class MeetingPlansTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(other.close)
         self.now = ts("2026-11-10")
         await MeetingPlans(other, self.client, clock=lambda: self.now).tick()
-        self.assertEqual(len(self.client.invites), 8)
+        self.assertEqual(len(self.client.invites), 1)
         self.assertEqual(len(self.client.booked), 5)
         self.assertEqual(len({r.start_time for r in self.client.booked}), 5)
         self.assertEqual(
@@ -128,12 +130,12 @@ class MeetingPlansTests(unittest.IsolatedAsyncioTestCase):
         a = await self.manager.create(self.request())
         b = await self.manager.create(self.request())
         self.assertEqual(a["id"], b["id"])
-        self.assertEqual(len(self.client.invites), 8)
+        self.assertEqual(len(self.client.invites), 1)
         with self.assertRaises(ValueError):
             await self.manager.create(self.request(subject="Changed"))
         with self.assertRaises(ValueError):
             await self.manager.create(self.request(request_id="another-message"))
-        self.assertEqual(len(self.client.invites), 8)
+        self.assertEqual(len(self.client.invites), 1)
 
     async def test_worker_missing_or_stale_fails_before_side_effects(self):
         self.now += 7201
@@ -195,7 +197,7 @@ class MeetingPlansTests(unittest.IsolatedAsyncioTestCase):
         self.now = ts("2026-12-01")
         await self.manager.tick()
         self.assertEqual(len(self.client.booked), 4)
-        self.assertEqual(len(self.client.invites), 8)
+        self.assertEqual(len(self.client.invites), 1)
         self.assertIn("不取消已发送", result["warning"])
 
     async def test_cancel_error_retains_booking_id_and_is_not_reported_successful(self):
@@ -219,7 +221,8 @@ class MeetingPlansTests(unittest.IsolatedAsyncioTestCase):
     async def test_unfinished_writes_from_crash_become_unknown(self):
         r = await self.manager.create(self.request(until_date="2026-11-09"))
         plan = self.store.get(r["id"])
-        plan["occurrences"][0].update(room="booking", invite="sending")
+        plan["occurrences"][0].update(room="booking")
+        plan["invite"]["state"] = "sending"
         self.store.save(plan)
         await self.manager.tick()
         result = self.manager.status(r["id"])

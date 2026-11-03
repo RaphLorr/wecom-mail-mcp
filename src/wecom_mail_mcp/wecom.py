@@ -61,7 +61,11 @@ class WeComMailClient:
             endpoint_name="get_email_alias",
         )
         mailbox = MailboxInfo(
-            email=self._require_string(data, "email", "Current sender mailbox is missing from the API response."),
+            email=self._require_string(
+                data,
+                "email",
+                "Current sender mailbox is missing from the API response.",
+            ),
             alias_list=self._coerce_string_list(data.get("alias_list")),
         )
         self._mailbox_info = mailbox
@@ -98,7 +102,9 @@ class WeComMailClient:
     # Schedule email (日程邮件)
     # ------------------------------------------------------------------
 
-    async def send_schedule_email(self, request: SendScheduleEmailRequest) -> MailboxInfo:
+    async def send_schedule_email(
+        self, request: SendScheduleEmailRequest
+    ) -> MailboxInfo:
         mailbox = await self.get_mailbox_info()
         payload = {
             "to": {"emails": request.to_emails},
@@ -110,10 +116,7 @@ class WeComMailClient:
                 "location": request.location,
                 "start_time": request.start_time,
                 "end_time": request.end_time,
-                "reminders": {
-                    "is_remind": 1,
-                    "remind_before_event_mins": request.remind_before_mins,
-                },
+                "reminders": request.schedule_reminders(),
             },
         }
         await self._request_authed(
@@ -362,24 +365,34 @@ class WeComMailClient:
         json_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         try:
-            response = await self._client.request(method, path, params=params, json=json_body)
+            response = await self._client.request(
+                method, path, params=params, json=json_body
+            )
             response.raise_for_status()
         except httpx.TimeoutException as exc:
-            raise WeComClientError(f"Request to WeCom API timed out at {endpoint_name}.") from exc
+            raise WeComClientError(
+                f"Request to WeCom API timed out at {endpoint_name}."
+            ) from exc
         except httpx.HTTPStatusError as exc:
             raise WeComClientError(
                 f"WeCom API returned HTTP {exc.response.status_code} at {endpoint_name}."
             ) from exc
         except httpx.RequestError as exc:
-            raise WeComClientError(f"Unable to reach WeCom API at {endpoint_name}: {exc}") from exc
+            raise WeComClientError(
+                f"Unable to reach WeCom API at {endpoint_name}: {exc}"
+            ) from exc
 
         try:
             data = response.json()
         except ValueError as exc:
-            raise WeComResponseError(f"WeCom API returned non-JSON content at {endpoint_name}.") from exc
+            raise WeComResponseError(
+                f"WeCom API returned non-JSON content at {endpoint_name}."
+            ) from exc
 
         if not isinstance(data, dict):
-            raise WeComResponseError(f"WeCom API returned an unexpected payload at {endpoint_name}.")
+            raise WeComResponseError(
+                f"WeCom API returned an unexpected payload at {endpoint_name}."
+            )
 
         return data
 
@@ -410,7 +423,9 @@ class WeComMailClient:
     def _coerce_string_list(value: Any) -> list[str]:
         if not isinstance(value, list):
             return []
-        return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+        return [
+            item.strip() for item in value if isinstance(item, str) and item.strip()
+        ]
 
     @staticmethod
     def _ensure_success(data: dict[str, Any], endpoint_name: str) -> None:

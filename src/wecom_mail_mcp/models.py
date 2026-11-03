@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -12,7 +13,6 @@ CONTENT_TYPE_ALIASES = {
     "html": "html",
     "text/html": "html",
 }
-
 
 
 def normalize_content_type(value: str | None) -> str:
@@ -28,7 +28,9 @@ def normalize_content_type(value: str | None) -> str:
     mapped = CONTENT_TYPE_ALIASES.get(normalized)
     if mapped is None:
         supported = ", ".join(sorted(CONTENT_TYPE_ALIASES))
-        raise ValueError(f"Unsupported content_type '{value}'. Supported values: {supported}")
+        raise ValueError(
+            f"Unsupported content_type '{value}'. Supported values: {supported}"
+        )
     return mapped
 
 
@@ -104,7 +106,9 @@ def normalize_attachment(value: object) -> AttachmentSpec:
         return AttachmentSpec(path=value)
     if isinstance(value, dict):
         return AttachmentSpec(**value)
-    raise ValueError(f"Attachment must be a path string or an object, got: {type(value).__name__}")
+    raise ValueError(
+        f"Attachment must be a path string or an object, got: {type(value).__name__}"
+    )
 
 
 class SendEmailRequest(BaseModel):
@@ -185,6 +189,26 @@ class MailboxInfoResult(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class WeeklyRepeat(BaseModel):
+    """Native compose_send weekly repeat fields, not separate invitations."""
+
+    model_config = {"extra": "forbid"}
+    repeat_type: Literal[1] = 1
+    repeat_interval: int = Field(default=1, ge=1, le=52)
+    repeat_until: int = Field(gt=0)
+    repeat_day_of_week: list[int] = Field(default_factory=list, max_length=7)
+    timezone: int = Field(default=8, ge=-12, le=12)
+
+    @field_validator("repeat_day_of_week")
+    @classmethod
+    def valid_weekdays(cls, value):
+        if any(day < 1 or day > 7 for day in value) or len(set(value)) != len(value):
+            raise ValueError(
+                "repeat_day_of_week must contain unique values 1 (Monday) through 7 (Sunday)"
+            )
+        return value
+
+
 class SendScheduleEmailRequest(BaseModel):
     """Validated input for a schedule (calendar) invitation email."""
 
@@ -195,7 +219,13 @@ class SendScheduleEmailRequest(BaseModel):
     location: str = Field(default="", description="Meeting location.")
     start_time: int = Field(description="Start time as Unix timestamp.")
     end_time: int = Field(description="End time as Unix timestamp.")
-    remind_before_mins: int = Field(default=15, ge=0, description="Remind N minutes before.")
+    remind_before_mins: int = Field(
+        default=15, ge=0, description="Remind N minutes before."
+    )
+    repeat: WeeklyRepeat | None = Field(
+        default=None,
+        description="Native weekly recurrence; one email invitation for the series. Omit for a single event.",
+    )
 
     @field_validator("to_emails")
     @classmethod
@@ -224,15 +254,41 @@ class SendScheduleEmailRequest(BaseModel):
     @model_validator(mode="after")
     def _validate_time_range(self) -> SendScheduleEmailRequest:
         validate_time_range(self.start_time, self.end_time)
+        if self.repeat:
+            from datetime import datetime, timezone, timedelta
+
+            if self.repeat.repeat_until < self.end_time:
+                raise ValueError("repeat_until must not precede the first event's end")
+            first = datetime.fromtimestamp(
+                self.start_time, timezone(timedelta(hours=self.repeat.timezone))
+            )
+            if not self.repeat.repeat_day_of_week:
+                self.repeat.repeat_day_of_week = [first.isoweekday()]
+            elif first.isoweekday() not in self.repeat.repeat_day_of_week:
+                raise ValueError("The first event must match repeat_day_of_week")
         return self
+
+    def schedule_reminders(self) -> dict:
+        reminders = {
+            "is_remind": 1,
+            "remind_before_event_mins": self.remind_before_mins,
+        }
+        if self.repeat:
+            reminders.update(self.repeat.model_dump())
+            reminders.update(is_repeat=1, is_custom_repeat=1)
+        return reminders
 
 
 class SendMeetingEmailRequest(SendScheduleEmailRequest):
     """Validated input for a meeting invitation email with 腾讯会议."""
 
-    meeting_admin_userid: str = Field(description="Meeting admin userid (required by WeCom).")
+    meeting_admin_userid: str = Field(
+        description="Meeting admin userid (required by WeCom)."
+    )
     enable_waiting_room: bool = Field(default=True, description="Enable waiting room.")
-    allow_enter_before_host: bool = Field(default=True, description="Allow joining before host.")
+    allow_enter_before_host: bool = Field(
+        default=True, description="Allow joining before host."
+    )
 
     @field_validator("meeting_admin_userid")
     @classmethod
@@ -252,6 +308,7 @@ class SendScheduleEmailResult(BaseModel):
     subject: str
     start_time: int
     end_time: int
+    repeat: WeeklyRepeat | None = None
     message: str = "日程邮件已发送。"
 
 

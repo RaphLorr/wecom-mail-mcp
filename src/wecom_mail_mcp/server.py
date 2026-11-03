@@ -29,6 +29,7 @@ from .models import (
     SendMeetingEmailResult,
     SendScheduleEmailRequest,
     SendScheduleEmailResult,
+    WeeklyRepeat,
 )
 from .wecom import WeComMailClient
 from .meeting_plans import MeetingPlans, PlanStore, WeeklyMeetingRequest
@@ -147,7 +148,7 @@ def create_server(settings: Settings) -> FastMCP[AppState]:
         instructions=(
             "通过企业微信官方 API 发送邮件、日程邀请、会议邀请，以及管理会议室预定。"
             "发件人固定为当前应用邮箱账号。"
-            "涉及周期会议或需要后续补订会议室时，使用 create_managed_meeting 并明确它是逐场发送邀请；"
+            "周期邀请用 send_schedule_email 的 repeat，一次发送整个系列；只有需要会议室滚动预约时才使用 create_managed_meeting。"
             "不要把邮件成功、location 地点文字或部分订房成功当成全部完成。"
             f"{HTML_EMAIL_GUIDANCE}"
         ),
@@ -160,11 +161,11 @@ def create_server(settings: Settings) -> FastMCP[AppState]:
     @mcp.tool(
         description=(
             "创建托管会议计划：按首场会议的当地星期/时间每周重复到 until_date（含）。"
-            "也可把 until_date 设为首场日期创建单场。每场分别发送日程邀请，不是一个原生周期日程。"
+            "也可把 until_date 设为首场日期创建单场。只发送一次带原生 repeat 的周期邀请，会议室才逐场处理。"
             "会议室只预约允许窗口内的日期，窗口外持久化待补订，由独立 worker 滚动处理。"
             "request_id 使用原用户消息 ID，重试必须复用；不同参数不能复用同一 ID。"
             "需明确用户已授权会议、收件人、会议室、周期结束日期及滚动补订。notify_email 必须是已确认的组织者邮箱。"
-            "调用前确认用户接受每场分别邀请；只需一次确认，不为每次自动补订反复询问。"
+            "不要再按每场发送邮件；没有会议室需求时直接调用 send_schedule_email(repeat=...)，无需后台任务。"
             "只有返回 complete=true 才能声称全部订房和邀请成功；否则逐项报告 pending_window/conflict/failed/unknown。"
             "同名地点 location 仅为文字，绝不能当成订房成功。worker 不健康时拒绝创建，避免承诺未来不会执行的补订。"
         )
@@ -244,6 +245,19 @@ def create_server(settings: Settings) -> FastMCP[AppState]:
         finally:
             store.close()
 
+    @mcp.tool(
+        description="用户明确要求重试时，只补发未发送或被业务接口拒绝的原生周期邀请。已发送/结果不明的邀请禁止重发；后台补订任务从不发送邀请。"
+    )
+    async def retry_managed_invitation(plan_id: str, ctx: Context) -> dict:
+        state = _require_state(ctx)
+        store = PlanStore(settings.wecom_meeting_store, settings.wecom_corp_id)
+        try:
+            return await MeetingPlans(
+                store, state.client, settings.wecom_room_advance_days
+            ).retry_invitation(plan_id)
+        finally:
+            store.close()
+
     # ------------------------------------------------------------------
     # Tool: send_email
     # ------------------------------------------------------------------
@@ -315,10 +329,11 @@ def create_server(settings: Settings) -> FastMCP[AppState]:
         name="send_schedule_email",
         title="Send Schedule Email",
         description=(
-            "发送单场日程邀请邮件。收件人会在企业微信日历中收到日程邀请。"
-            "只发送单场邀请，不预订会议室；location 仅为文字。涉及周期和订房时优先 create_managed_meeting。"
+            "发送日程邀请邮件；repeat 可设置原生每周重复（repeat_type=1，repeat_day_of_week 周一=1至周日=7，repeat_until 为结束时间戳）。"
+            "一次发送整个周期邀请，不按每场发邮件。不需要会议室时直接用本工具，无需托管计划或后台任务。"
+            "本工具不预订会议室；location 仅为文字。需要周期订房时使用 create_managed_meeting，避免再调用本工具重复发邀请。"
             "适用于大多数会议邀请场景。如需创建腾讯会议（含会议链接），请使用 send_meeting_email。"
-            "注意：此接口不支持取消已发送的日程邀请。"
+            "当前工具不暴露取消已发送邀请的操作；API 取消需要已知 schedule_id，发送响应未可靠返回该 ID。"
         ),
     )
     async def send_schedule_email(
@@ -331,6 +346,7 @@ def create_server(settings: Settings) -> FastMCP[AppState]:
         location: MeetingLocation = "",
         remind_before_mins: RemindBeforeMins = 15,
         content_type: EmailContentType = "text",
+        repeat: WeeklyRepeat | None = None,
     ) -> SendScheduleEmailResult:
         try:
             request = SendScheduleEmailRequest(
@@ -342,6 +358,7 @@ def create_server(settings: Settings) -> FastMCP[AppState]:
                 start_time=start_time,
                 end_time=end_time,
                 remind_before_mins=remind_before_mins,
+                repeat=repeat,
             )
         except ValidationError as exc:
             raise ValueError(summarize_validation_error(exc)) from exc
@@ -355,6 +372,7 @@ def create_server(settings: Settings) -> FastMCP[AppState]:
             subject=request.subject,
             start_time=request.start_time,
             end_time=request.end_time,
+            repeat=request.repeat,
         )
 
     # ------------------------------------------------------------------

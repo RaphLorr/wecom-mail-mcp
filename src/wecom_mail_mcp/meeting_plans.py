@@ -17,17 +17,25 @@ import sqlite3
 import time
 import uuid
 from contextlib import contextmanager
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, time as calendar_time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from pydantic import Field, model_validator
 
 from .errors import WeComAPIError
-from .models import BookMeetingRoomRequest, SendScheduleEmailRequest, SendEmailRequest
+from .models import (
+    BookMeetingRoomRequest,
+    SendScheduleEmailRequest,
+    SendEmailRequest,
+    WeeklyRepeat,
+)
 
 
 class WeeklyMeetingRequest(SendScheduleEmailRequest):
+    repeat: None = (
+        None  # Derived from until_date/first occurrence; cannot contradict room dates.
+    )
     request_id: str = Field(min_length=1, max_length=200)
     until_date: date
     timezone: str = "Asia/Shanghai"
@@ -66,6 +74,21 @@ class WeeklyMeetingRequest(SendScheduleEmailRequest):
             raise ValueError(
                 "until_date must be within one year of the first occurrence"
             )
+        offset = start.utcoffset().total_seconds() / 3600
+        if not offset.is_integer() or not -12 <= offset <= 12:
+            raise ValueError("邮件 API repeat 仅支持 -12 至 +12 的整数小时 UTC 偏移")
+        day = start.date()
+        while day <= self.until_date:
+            if (
+                datetime.combine(
+                    day, start.timetz().replace(tzinfo=None), ZoneInfo(self.timezone)
+                ).utcoffset()
+                != start.utcoffset()
+            ):
+                raise ValueError(
+                    "计划跨越夏令时偏移变化，当前邮件 repeat 无法等价表达；请用客户端处理，不拆成多封邀请"
+                )
+            day += timedelta(days=7)
         return self
 
 
@@ -93,7 +116,6 @@ def weekly_occurrences(request: WeeklyMeetingRequest) -> list[dict]:
                 "start_time": int(start.timestamp()),
                 "end_time": int(end.timestamp()),
                 "room": "pending",
-                "invite": "pending",
                 "attempts": 0,
                 "next_attempt": 0,
             }
@@ -126,7 +148,9 @@ class PlanStore:
     @contextmanager
     def exclusive(self):
         if fcntl is None:
-            raise RuntimeError("Managed meeting plans require POSIX file locking; existing mail tools remain available")
+            raise RuntimeError(
+                "Managed meeting plans require POSIX file locking; existing mail tools remain available"
+            )
         with open(str(self.path) + ".lock", "a") as lock:
             os.chmod(str(self.path) + ".lock", 0o600)
             try:
@@ -187,21 +211,30 @@ class MeetingPlans:
 
     def status(self, plan_id):
         plan = self.store.get(plan_id)
+        if plan.get("schema_version") != 2:
+            return {
+                **plan,
+                "complete": False,
+                "calendar_mode": "legacy_requires_review",
+                "worker_healthy": self.store.worker_ready(self.clock()),
+                "warning": "旧版逐场邀请计划已隔离，禁止自动重发或转换。请先核对已有日历邀请，再明确迁移。",
+            }
         counts = {}
         for row in plan["occurrences"]:
-            for kind in ["room", "invite"]:
+            for kind in ["room"]:
                 key = f"{kind}_{row[kind]}"
                 counts[key] = counts.get(key, 0) + 1
+        counts["invite_" + plan["invite"]["state"]] = 1
         return {
             **plan,
             "counts": counts,
             "worker_healthy": self.store.worker_ready(self.clock()),
             "complete": plan["state"] == "active"
-            and all(
-                r["room"] == "booked" and r["invite"] == "sent"
-                for r in plan["occurrences"]
-            ),
-            "calendar_mode": "separate_invitation_per_occurrence",
+            and plan["invite"]["state"] == "sent"
+            and all(r["room"] == "booked" for r in plan["occurrences"]),
+            "calendar_mode": "native_repeat"
+            if len(plan["occurrences"]) > 1
+            else "single_invitation",
             "warning": "地点文字不代表会议室已预订。pending_window 是尚未开放，不是预订成功；unknown 必须人工核对后处理。取消计划不取消已发送的日历邀请。",
         }
 
@@ -242,6 +275,8 @@ class MeetingPlans:
                     "已有托管计划使用这些会议室时段，请先查询确认，不要重复创建"
                 )
             plan = {
+                "schema_version": 2,
+                "invite": {"state": "pending"},
                 "id": str(uuid.uuid4()),
                 "state": "active",
                 "request": request.model_dump(mode="json"),
@@ -261,6 +296,8 @@ class MeetingPlans:
                     ),
                 )
             await self._process(plan)
+            await self._send_series_invitation(plan)
+            await self._notify(plan)
             return self.status(plan["id"])
 
     async def tick(self):
@@ -272,11 +309,30 @@ class MeetingPlans:
             for plan in self.store.active():
                 if plan["state"] != "active":
                     continue
+                for row in plan["occurrences"]:
+                    if row["room"] == "booking":
+                        row["room"] = "unknown"
+                if (
+                    plan.get("schema_version") == 2
+                    and plan["invite"]["state"] != "sent"
+                ):
+                    if plan["invite"]["state"] == "sending":
+                        plan["invite"]["state"] = "unknown"
+                    elif plan["invite"]["state"] == "pending":
+                        plan["invite"]["state"] = "not_sent"
+                    self.store.save(plan)
+                    await self._notify(plan)
+                    count += 1
+                    continue
                 await self._process(plan)
                 count += 1
             return {"status": "ok", "plans_checked": count}
 
     async def _process(self, plan):
+        if plan.get("schema_version") != 2:
+            plan["state"] = "requires_review"
+            self.store.save(plan)
+            return
         request = WeeklyMeetingRequest.model_validate(plan["request"])
         now = self.clock()
         for key, value in plan["notices"].items():
@@ -286,14 +342,10 @@ class MeetingPlans:
             # Lock ownership proves no other live writer can still be making these writes.
             if row["room"] == "booking":
                 row["room"] = "unknown"
-            if row["invite"] == "sending":
-                row["invite"] = "unknown"
             self.store.save(plan)
             if row["start_time"] <= now:
                 if row["room"] not in ["booked", "unknown", "cancelled"]:
                     row["room"] = "expired"
-                if row["invite"] == "pending":
-                    row["invite"] = "expired"
                 self.store.save(plan)
                 continue
             due = row["start_time"] <= now + self.advance_days * 86400
@@ -366,30 +418,78 @@ class MeetingPlans:
                         f":{exc.errcode}" if isinstance(exc, WeComAPIError) else ""
                     )
                     self.store.save(plan)
-            if row["invite"] == "pending":
-                row["invite"] = "sending"
-                self.store.save(plan)
-                try:
-                    note = "会议室状态由后台滚动预约管理；地点名称不代表所有日期均已预订，异常会通知组织者。"
-                    invite = SendScheduleEmailRequest(
-                        to_emails=request.to_emails,
-                        subject=request.subject,
-                        content=request.content + "\n\n" + note,
-                        content_type=request.content_type,
-                        location=request.location,
-                        start_time=row["start_time"],
-                        end_time=row["end_time"],
-                        remind_before_mins=request.remind_before_mins,
-                    )
-                    await self.client.send_schedule_email(invite)
-                    row["invite"] = "sent"
-                except Exception as exc:
-                    row["invite"] = (
-                        "failed" if isinstance(exc, WeComAPIError) else "unknown"
-                    )
-                    row["invite_error"] = type(exc).__name__
-                self.store.save(plan)
         await self._notify(plan)
+
+    async def _send_series_invitation(self, plan):
+        # Only an explicit creation/retry tool calls this. The worker NEVER sends invites.
+        if plan["invite"]["state"] != "pending":
+            return
+        request = WeeklyMeetingRequest.model_validate(plan["request"])
+        if request.start_time <= self.clock():
+            plan["invite"]["state"] = "expired"
+            self.store.save(plan)
+            return
+        zone = ZoneInfo(request.timezone)
+        first = datetime.fromtimestamp(request.start_time, zone)
+        repeat = None
+        if len(plan["occurrences"]) > 1:
+            until = (
+                int(
+                    datetime.combine(
+                        request.until_date + timedelta(days=1), calendar_time.min, zone
+                    ).timestamp()
+                )
+                - 1
+            )
+            repeat = WeeklyRepeat(
+                repeat_until=until,
+                repeat_day_of_week=[first.isoweekday()],
+                timezone=int(first.utcoffset().total_seconds() / 3600),
+            )
+        invite = SendScheduleEmailRequest(
+            to_emails=request.to_emails,
+            subject=request.subject,
+            content=request.content
+            + "\n\n会议室按预约窗口滚动补订；邀请中的地点不代表所有日期均已预订，异常会通知组织者。",
+            content_type=request.content_type,
+            location=request.location,
+            start_time=request.start_time,
+            end_time=request.end_time,
+            remind_before_mins=request.remind_before_mins,
+            repeat=repeat,
+        )
+        plan["invite"]["state"] = "sending"
+        self.store.save(plan)
+        try:
+            await self.client.send_schedule_email(invite)
+            plan["invite"].update(
+                state="sent", repeat=repeat.model_dump() if repeat else None
+            )
+        except Exception as exc:
+            plan["invite"].update(
+                state="failed" if isinstance(exc, WeComAPIError) else "unknown",
+                error=type(exc).__name__,
+            )
+        self.store.save(plan)
+
+    async def retry_invitation(self, plan_id):
+        with self.store.exclusive() as acquired:
+            if not acquired:
+                return {"status": "busy"}
+            plan = self.store.get(plan_id)
+            if (
+                plan.get("schema_version") != 2
+                or plan["state"] != "active"
+                or plan["invite"]["state"] not in {"failed", "not_sent"}
+            ):
+                raise ValueError(
+                    "只能明确重试未发送/业务拒绝的系列邀请；已发送或结果不明不能重发"
+                )
+            plan["invite"]["state"] = "pending"
+            self.store.save(plan)
+            await self._send_series_invitation(plan)
+            await self._notify(plan)
+            return self.status(plan_id)
 
     async def _notify(self, plan):
         events = []
@@ -399,7 +499,6 @@ class MeetingPlans:
                     "room",
                     {"booked", "conflict", "failed", "retry", "unknown", "expired"},
                 ),
-                ("invite", {"failed", "unknown"}),
             ]:
                 if row[kind] not in states:
                     continue
@@ -407,6 +506,20 @@ class MeetingPlans:
                 key = f"{row['start_time']}:{kind}:{row[kind]}"
                 if key not in plan["notices"]:
                     events.append((key, row, kind))
+        invite = plan.get("invite", {})
+        if invite.get("state") in {"failed", "unknown", "not_sent", "expired"}:
+            key = "series:invite:" + invite["state"]
+            if key not in plan["notices"]:
+                events.append(
+                    (
+                        key,
+                        {
+                            "start_time": plan["request"]["start_time"],
+                            "invite": invite["state"],
+                        },
+                        "invite",
+                    )
+                )
         if not events:
             return
         for key, _, _ in events:
@@ -456,10 +569,19 @@ class MeetingPlans:
                         row["cancel_error"] = "取消未确认成功；保留 booking_id 供核对"
                 elif row["room"] != "unknown":
                     row["room"] = "cancelled"
-                if row["invite"] == "pending":
-                    row["invite"] = "cancelled"
-                elif row["invite"] == "sending":
-                    row["invite"] = "unknown"
+                if (
+                    "invite" in row
+                ):  # Legacy records remain explicit; never resend them.
+                    if row["invite"] == "pending":
+                        row["invite"] = "cancelled"
+                    elif row["invite"] == "sending":
+                        row["invite"] = "unknown"
+                self.store.save(plan)
+            if plan.get("schema_version") == 2:
+                if plan["invite"]["state"] == "pending":
+                    plan["invite"]["state"] = "cancelled"
+                elif plan["invite"]["state"] == "sending":
+                    plan["invite"]["state"] = "unknown"
                 self.store.save(plan)
             return self.status(plan_id)
 

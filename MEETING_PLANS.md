@@ -6,10 +6,34 @@ For a single occurrence, set `until_date` to the first meeting's local date.
 Weekly occurrences preserve the first meeting's weekday and wall-clock time.
 The end date is inclusive. Maximum: 52 occurrences and one year.
 
-This is **not a native recurring calendar event**: the existing compose API wrapper
-sends one invitation per occurrence. The tool explicitly describes this behavior;
-obtain the user's agreement to this delivery mode before calling it. Do not call
-the old send/book tools as well for the same dates.
+The calendar invitation is **one native recurring invitation for the whole series**.
+The mail API's `schedule.reminders` carries `is_repeat`, `is_custom_repeat`,
+`repeat_type=1`, `repeat_interval`, `repeat_day_of_week` and `repeat_until`.
+Only room bookings are expanded into individual occurrences. The worker never
+sends calendar invitations. Do not call the old send/book tools as well for the
+same series/dates.
+
+If no meeting room is needed, call `send_schedule_email` with `repeat` directly;
+no plan database, organizer alert email or worker is required. Example:
+
+```json
+{
+  "repeat": {
+    "repeat_type": 1,
+    "repeat_interval": 1,
+    "repeat_day_of_week": [1],
+    "timezone": 8,
+    "repeat_until": 1798473599
+  }
+}
+```
+
+Weekdays are 1 (Monday) through 7 (Sunday). The public tool currently exposes
+weekly recurrence; omit `repeat` for a single event. The managed plan derives the
+weekly rule from its first local date/time and inclusive `until_date`, without
+asking the model to keep room and invitation rules in sync. Because the mail API
+uses an integer UTC offset, managed periods crossing DST or using fractional-hour
+offsets are rejected instead of silently shifting or splitting the series.
 
 Required plan fields:
 
@@ -49,9 +73,13 @@ room reservations may still be pending. A location string never reserves a room.
   records before an operator reconciles the stored outcome. Invitation failures
   also do not trigger automatic resends.
 - Availability query failures are never treated as proof that a room is empty.
-- `get_managed_meeting` reports separate room/invite counts, worker health and
-  per-occurrence booking IDs. `complete=true` requires all rooms booked and all
-  invitations confirmed sent. `list_managed_meetings` finds existing plans.
+- `get_managed_meeting` reports one series-level `invite` outcome, room counts,
+  worker health and per-occurrence booking IDs. `complete=true` requires all rooms
+  booked and the one invitation confirmed sent. `list_managed_meetings` finds
+  existing plans. The room worker pauses further bookings if the invitation is
+  not confirmed sent. `retry_managed_invitation` is an explicit user action for
+  definite rejections/unattempted sends only; unknown or sent invitations cannot
+  be replayed.
 
 The original request ID is idempotent across process restarts. Reusing it with a
 different payload is rejected. Overlapping active managed room/time plans are
@@ -104,6 +132,11 @@ future booking IDs. Failed/unknown cancellations stay visible. It does **not**
 cancel sent calendar invitations: the existing compose wrapper does not expose
 a reliably manageable calendar event ID.
 
-This deployment does not import, resend, cancel, or change existing meetings.
+Version 2 plan records store invitation state at series level. Any old
+per-occurrence plan is quarantined as `requires_review`, without sending or
+automatically converting invitations. This deployment does not import, resend,
+cancel, or change existing meetings.
 To repair an older series, first audit every occurrence and its provider booking
 records. Do not recreate it with this tool: doing so would resend invitations.
+
+API source: [WeCom: send schedule email](https://developer.work.weixin.qq.com/document/path/97854).
