@@ -25,6 +25,11 @@ from pydantic import Field, model_validator
 
 from .errors import WeComAPIError
 from .meeting_errors import MAX_ROOM_FAILURES, TRANSIENT_ROOM_CODES, room_error_detail
+from .meeting_notices import (
+    ROOM_ALERT_STATES,
+    INVITE_ALERT_STATES,
+    render_meeting_alert,
+)
 from .models import (
     BookMeetingRoomRequest,
     SendScheduleEmailRequest,
@@ -531,7 +536,7 @@ class MeetingPlans:
             for kind, states in [
                 (
                     "room",
-                    {"booked", "conflict", "failed", "retry", "unknown", "expired"},
+                    ROOM_ALERT_STATES,
                 ),
             ]:
                 if row[kind] not in states:
@@ -541,7 +546,7 @@ class MeetingPlans:
                 if key not in plan["notices"]:
                     events.append((key, row, kind))
         invite = plan.get("invite", {})
-        if invite.get("state") in {"failed", "unknown", "not_sent", "expired"}:
+        if invite.get("state") in INVITE_ALERT_STATES:
             key = "series:invite:" + invite["state"]
             if key not in plan["notices"]:
                 events.append(
@@ -559,26 +564,12 @@ class MeetingPlans:
         for key, _, _ in events:
             plan["notices"][key] = "sending"
         self.store.save(plan)
-        zone = ZoneInfo(plan["request"]["timezone"])
-        lines = [
-            f"{datetime.fromtimestamp(row['start_time'], zone).isoformat()} {kind}={row[kind]}"
-            + (
-                " " + json.dumps(row["room_error_detail"], ensure_ascii=False)
-                if kind == "room" and row.get("room_error_detail")
-                else ""
-            )
-            for _, row, kind in events
-        ]
         try:
             await self.client.send_email(
                 SendEmailRequest(
                     to_email=plan["request"]["notify_email"],
-                    subject="会议室预约进度：" + plan["request"]["subject"],
-                    content="计划 "
-                    + plan["id"]
-                    + "\n"
-                    + "\n".join(lines)
-                    + "\n待开放日期尚未预订。unknown 请核对实际记录，不要重复发送/预订。",
+                    subject="会议安排异常：" + plan["request"]["subject"],
+                    content=render_meeting_alert(plan, events),
                 )
             )
             state = "sent"

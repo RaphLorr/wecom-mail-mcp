@@ -90,8 +90,9 @@ room reservations may still be pending. A location string never reserves a room.
   Credential assignments and URLs are redacted; generic exception messages and
   request tracebacks are not copied into diagnostics. No full request, invitation
   body, credentials or token-bearing URL is recorded. Details also appear in
-  organizer failure alerts. Successful recovery clears stale errors. Older
-  code-only records cannot recover provider explanations that were never saved.
+  organizer exception alerts, in readable form rather than a raw JSON dump.
+  Successful recovery clears stale errors. Older code-only records cannot recover
+  provider explanations that were never saved.
 - `get_managed_meeting` reports one series-level `invite` outcome, room counts,
   worker health and per-occurrence booking IDs. `complete=true` requires all rooms
   booked and the one invitation confirmed sent. `list_managed_meetings` finds
@@ -107,10 +108,16 @@ and the worker. SQLite uses durable commits before and after external writes.
 It cannot make the provider APIs transactional or guarantee exactly-once delivery
 after an ambiguous network result.
 
-Changes to booked/conflicting/failed states generate a batched email to the
-confirmed `notify_email`. Notification attempts are durable and ambiguous sends
-are not replayed. Status queries remain the authoritative recovery view; alerts
-cannot be guaranteed if the email provider itself fails.
+Normal booking success and dates awaiting the booking window do not generate
+progress emails. Only exceptions (conflicts, failed/retrying/unknown/expired room
+operations or failed/unknown/unsent/expired invitations) generate a batched alert
+to the confirmed `notify_email`. Each alert explains the affected date, room,
+actual problem and retry/verification action. It does not include raw plan IDs,
+state assignments or irrelevant pending/unknown warnings. Successful recovery is
+visible in status queries without another email. Notification attempts remain
+durable and ambiguous sends are not replayed. Status queries remain the
+authoritative recovery view; alerts cannot be guaranteed if the email provider
+itself fails.
 
 ## Running the worker
 
